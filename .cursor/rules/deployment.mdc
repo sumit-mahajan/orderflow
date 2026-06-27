@@ -1,0 +1,62 @@
+---
+description: Local deployment contract for OrderFlow (all Docker Compose, no cloud — D-14).
+alwaysApply: false
+status: LOCKED — 2026-06-27
+---
+
+# OrderFlow — Local Deployment Contract
+
+> Cloud targets are N/A (D-14). Everything runs via `docker compose up`. This locks the
+> service list, ports, and env contract; the actual `docker-compose.yml` + Dockerfiles are
+> built in M1 (infra + services) and extended each milestone.
+
+## Containers & ports (host)
+| Service | Port | Notes |
+|---|---|---|
+| postgres | 5432 | one instance, 4 schemas, per-service user (D-04) |
+| kafka (KRaft) | 9092 | single broker, no Zookeeper (D-05) |
+| redis | 6379 | idempotency keys + saga locks |
+| order-service | 8080 | REST + SSE + orchestrator + outbox relay |
+| inventory-service | 8081 | M1 |
+| payment-service | 8082 | M2 |
+| shipment-service | 8083 | M3 |
+| zipkin | 9411 | tracing (M4) |
+| prometheus | 9090 | metrics scrape (M4) |
+| grafana | 3000 | dashboards (M4) |
+| frontend | 5173 (dev) / 8088 (served) | React dashboard (M4) |
+
+## Compose phasing
+- **M1:** postgres + kafka + redis + order-service + inventory-service.
+- **M2:** + payment-service.
+- **M3:** + shipment-service.
+- **M4:** + zipkin + prometheus + grafana + frontend.
+- Healthchecks on infra; services `depends_on` infra healthy. Named volumes for PG/Kafka data
+  (git-ignored: `pgdata/`, `kafka-data/`).
+
+## Dockerfile strategy
+- Each Java service: multi-stage (Maven build → slim JRE 21 runtime, e.g. `eclipse-temurin:21-jre`).
+- Frontend: build with Node → serve static via nginx (or Vite dev in dev compose).
+- One parent build; per-module image.
+
+## Env contract (`.env.example` — names only, no values)
+```
+# Postgres
+POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB
+ORDER_DB_USER, ORDER_DB_PASSWORD
+INVENTORY_DB_USER, INVENTORY_DB_PASSWORD
+PAYMENT_DB_USER, PAYMENT_DB_PASSWORD
+SHIPMENT_DB_USER, SHIPMENT_DB_PASSWORD
+# Kafka
+KAFKA_BOOTSTRAP_SERVERS
+# Redis
+REDIS_HOST, REDIS_PORT
+# Observability (M4)
+OTEL_EXPORTER_ZIPKIN_ENDPOINT
+# Service ports (optional overrides)
+ORDER_PORT, INVENTORY_PORT, PAYMENT_PORT, SHIPMENT_PORT
+```
+- Secrets never committed; `.env` git-ignored; only `.env.example` in repo.
+- Spring config via env-var overrides of `application.yml` (12-factor).
+
+## Build/test gate before run
+- `mvn verify` (units + TestContainers integration) green before `docker compose up`.

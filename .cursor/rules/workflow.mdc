@@ -1,0 +1,296 @@
+---
+description: How to implement initially planned features in this app
+alwaysApply: true
+---
+
+# Project Build Workflow
+
+## Ground Rules
+
+- Execute steps sequentially. Never proceed without explicit user confirmation.
+- At the end of every session, update `session-state.mdc` before stopping.
+- At the start of every session, read `session-state.mdc`, `features.mdc`,
+  `architecture.mdc`, and `decisions.mdc` before taking any action.
+- Never contradict a locked `.mdc` file without flagging the conflict
+  explicitly and getting confirmation to update it.
+
+---
+
+## Step 0 — Clarifying Questions
+
+Ask all ambiguous questions upfront. Cover:
+
+- Who are the users and what's the core user journey?
+- Any hard constraints (auth required? multi-tenant? offline support?)
+- Preferred languages/frameworks if not specified
+- Success criteria — what does "done" look like for v1?
+
+Do not proceed until all questions are answered.
+
+---
+
+## Step 1 — Lock Features (`features.mdc`)
+
+Create `features.mdc` with two sections:
+
+**Core (building now):**
+
+- Exhaustive list of v1 features with acceptance criteria per feature
+- Each feature tagged with priority (P0/P1/P2)
+
+**Extensible (future, not building):**
+
+- List of anticipated future features
+- Note any architectural decisions that must be made now to support them later
+
+Confirm with user before locking.
+
+---
+
+## Step 1.5 — Lock UI Style (`ui-style.mdc`)
+
+After features are locked, define the visual language before any frontend code is written.
+Record decisions in `ui-style.mdc`; reference it throughout Step 5. **Defaults below apply to
+every project** unless the user explicitly overrides.
+
+**Lock in `ui-style.mdc`:**
+
+- **Aesthetic** — modern minimal, production-grade startup: clean whitespace, neutral palette,
+  one accent, sharp typography, subtle shadows/borders. No gradients or decorative clutter.
+  Stack: shadcn/ui pattern (Tailwind + HSL CSS vars in `:root`/`.dark` + CVA). Inter via
+  Google Fonts in `index.css`.
+- **Branding** — before any UI code, use `GenerateImage` for a concept-driven icon (never a
+  plain letter): `frontend/public/logo.png` (≥512×512), `favicon.svg`, `og-image.png`
+  (1200×630). Reference logo in nav, login, and `apple-touch-icon`.
+- **`index.html`** — full meta/OG/Twitter tags (`title`, `description`, `theme-color`, `og:*`,
+  `twitter:*`, favicon links). Never ship Vite defaults.
+- **Dark mode** — default light; sun/moon `ThemeToggle` in app header and landing nav; persist
+  `<appname>-theme` in localStorage; `darkMode: 'class'`; inline `<script>` in `index.html`
+  before React mounts to prevent flash; light tokens in `:root`, dark in `.dark` (not media query).
+- **Landing page** — always at `/`, always public (no auto-redirect when signed in). Sections:
+  sticky nav · hero · features · how-it-works · CTA · footer. Signed-in users see "Go to
+  Dashboard →" in nav and hero instead of "Sign in". App routes under `/dashboard`, etc.;
+  post-login redirect to `/dashboard`.
+- **Responsive** — container `max-w-7xl … 2xl:max-w-[1440px]`; hamburger nav on mobile
+  (`hidden md:flex` desktop links); 44px touch targets; `grid-cols-2 lg:grid-cols-4` stat grids;
+  `break-words`/`break-all` on long paths; `3xl: '1920px'` breakpoint.
+- **UX patterns** — skeleton loaders (not spinners) shaped to content; `fade-in` on pages/cards;
+  entire list cards clickable via `<Link>` with inline context; per-item settings on dedicated
+  pages (never inline on list cards); grouped forms use draft + Save/Discard + toasts (sonner),
+  no auto-save; semantic badges with `dark:` variants.
+
+Confirm with user before locking. Once locked, flag any deviation and get confirmation.
+
+---
+
+## Step 2 — Lock Architecture (`architecture.mdc` + `decisions.mdc`)
+
+**`architecture.mdc`** must define:
+
+- Backend: Clean Architecture layers
+  (Entities → Use Cases → Interface Adapters → Infrastructure)
+- Frontend: Feature-based structure
+  (pages / components / hooks / store / services per feature)
+- Auth strategy
+- Error handling pattern and structured logging approach
+- Observability plan (what gets logged, how errors surface in free-tier hosting)
+- LLM integration layer (model: Gemini 2.5 Flash or newer with equal/more
+  free limits; fallback strategy on rate limits)
+- Cover **Concurrency & reliability** — document what is actually implemented; note known gaps explicitly
+
+**`decisions.mdc`** must record every non-obvious decision as:
+
+```
+Decision: [what]
+Context: [why this was needed]
+Alternatives considered: [what else was evaluated]
+Rejected because: [concrete reason]
+```
+
+Confirm with user before locking.
+
+---
+
+## Step 2.5 — Initialize Session State (`session-state.mdc`)
+
+Create `session-state.mdc` with:
+
+```
+Last completed step: 2
+Current in-progress: —
+Decisions made this session: [list]
+Open questions / blockers: [list]
+Next immediate action: Start Step 3
+```
+
+Update this file at the end of every session without being asked.
+
+---
+
+## Step 3 — Lock Data Contracts (`schema.mdc`)
+
+Define and lock:
+
+- DB schema (tables, columns, types, indexes, FK constraints)
+  - Include soft delete, created_at/updated_at on all entities
+  - Flag fields added only for future extensibility
+- DTOs (request/response shapes per endpoint)
+- API contract (OpenAPI spec or equivalent)
+  - All endpoints, methods, auth requirements, request/response schemas
+  - Error response shapes must be consistent across all endpoints
+
+No implementation starts until schema and API contract are locked.
+Confirm with user before locking.
+
+---
+
+## Step 4 — Workspace Setup
+
+1. Verify or create skill/reference files needed for accurate implementation
+2. Create `reviewer.mdc` with an explicit review checklist (see below)
+3. Confirm tooling: linter, formatter, test runner configured
+
+**`reviewer.mdc` checklist (run against every git diff before commit):**
+
+- [ ] No business logic in controllers/route handlers
+- [ ] No direct DB calls outside the repository/data layer
+- [ ] All endpoints have auth checks where required
+- [ ] No secrets or credentials in code
+- [ ] DTOs validated at the boundary (not inside use cases)
+- [ ] Every new function has at least one unit test
+- [ ] Error responses match the locked error shape from schema.mdc
+- [ ] No deviation from architecture.mdc layer boundaries
+- [ ] No new external dependency added without updating decisions.mdc
+
+Confirm with user before proceeding.
+
+---
+
+## Step 4.5 — Lock Deployment Config
+
+Define before writing any feature code:
+
+- Hosting targets:
+  - Frontend → Vercel (free)
+  - Backend → Render or Railway free tier (document cold start behavior)
+  - DB → Neon Postgres free tier
+  - Vector DB (if needed) → Pinecone free tier (2GB, no expiry)
+  - LLM → Gemini free tier via AI Studio (1,500 RPD; add retry/backoff
+    for 429s; never hardcode API keys client-side)
+- Dockerfile or platform config committed to repo
+- `.env.example` with all required vars (no values)
+- Before pushing, build and test apps
+
+Confirm with user before proceeding.
+
+---
+
+## Step 5 — Incremental Feature Build
+
+For each feature:
+
+1. Write the contract first (function signatures, interfaces) — confirm
+2. Write tests against the contract (before implementation)
+3. Implement until tests pass
+4. Run reviewer.mdc checklist against git diff
+5. Confirm with user before marking feature done and moving to next
+
+**Definition of done per feature:**
+
+- Unit tests pass
+- Integration test for the happy path passes
+- Reviewer checklist passes with no unchecked items
+- **`session-state.mdc` updated** (see Feature Completion Gate below)
+
+**Batching rule:** Once 2-3 features are complete and patterns are
+stable, related features in the same domain/layer may be batched.
+Never batch across architectural boundaries.
+
+---
+
+## Feature Completion Gate (mandatory)
+
+Before marking **any** feature `DONE` in `session-state.mdc` or moving to the next
+feature ID, complete **all** of the following:
+
+1. **Acceptance criteria audit** — Open `features.mdc` for that feature ID. Every
+   bullet in acceptance criteria must be verified (automated test, SQL/Redis check, or
+   documented manual step). Record pass/fail in session-state under the feature row.
+
+2. **No partial features** — DB tables, interfaces, or `# F-XX` comments alone do **not**
+   count as done. If only part of a feature is implemented (e.g. tree-sitter without
+   pgvector writes), mark it `PARTIAL` or `DEFERRED` in session-state — never `DONE`.
+
+3. **Explicit deferral when skipping order** — The planned build order in session-state
+   is the default. Skipping a feature (e.g. building F-04 before F-03) requires an
+   explicit `DEFERRED: F-XX — <reason>` line in session-state **before** starting the
+   substitute feature. P0 does not automatically override P1 without recording why.
+
+4. **Integration proof for data features** — Features that persist or queue data must
+   have an observable artifact before `DONE`:
+   - Embeddings → `SELECT COUNT(*) FROM code_embeddings` > 0 after a test PR
+   - Reviews → row in `reviews` + optional GitHub post
+   - Queue → message XACK'd; `XPENDING` not growing unbounded
+   - "Code exists" or "table migrated" is insufficient.
+
+5. **session-state hygiene** — On every feature boundary update: `Last Completed Step`,
+   `Current In-Progress`, and `Next Immediate Action`. Stale "Next action" from earlier
+   steps (e.g. Step 4 setup) must be removed or updated — never left contradictory.
+
+6. **Cross-feature comment scan** — Before marking feature N done, grep the diff for
+   `# F-<other>` references. Any comment pointing at unfinished work in another feature
+   ID is a blocker unless that other feature is marked `PARTIAL` with listed gaps.
+
+---
+
+## Commit Policy
+
+**Never run `git commit` unless the user explicitly asks.**
+
+Finishing a task, passing tests, or updating `session-state.mdc` does **not** authorize a
+commit. When work is done but the user has not asked to commit:
+
+1. Summarize what changed
+2. Tell the user changes are uncommitted and ready for review
+3. Wait for explicit approval
+
+Commit only when the user clearly requests it — e.g. "commit", "commit this", "proceed",
+"proceed to next", or "continue" in the Proceed Protocol sense below.
+
+Commit message format: `feat: <feature-id> <short description>` (e.g. `feat: F-05 async worker system`).
+Use `chore:` for setup/config steps (e.g. `chore: Step 4.5 deployment config`).
+Use `fix:` for bug fixes. One logical change per commit.
+
+---
+
+## Proceed Protocol
+
+When the user says "proceed", "proceed to next", or "continue" **meaning advance to the
+next build step**, this means: "I have reviewed and approve the work shown above — commit
+it and build the next feature."
+
+1. **Commit the approved work** — stage and commit only the work the user just reviewed.
+   Do not start the next feature until the commit succeeds.
+2. **Build the next feature** — implement contracts → tests → implementation.
+3. **STOP when the feature is complete** — do NOT commit automatically. Instead:
+   - Run the reviewer.mdc checklist against `git diff HEAD` (non-staged changes)
+   - Present the checklist results and a brief summary to the user
+   - Wait for explicit approval before committing
+
+"Proceed" approves the _previous_ feature. The _next_ feature always needs its own
+review+approval cycle before it is committed.
+
+If the user says "continue" while reviewing or discussing (not advancing the build),
+do **not** commit — ask what they want to do next.
+
+---
+
+## Session Resume Protocol
+
+At the start of any new session, before any action:
+
+1. Read `session-state.mdc`
+2. Read `features.mdc`
+3. Read `architecture.mdc`
+4. Read `decisions.mdc`
+5. Summarize current state to user and confirm what to work on next

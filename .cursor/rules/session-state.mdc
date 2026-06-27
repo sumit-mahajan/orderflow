@@ -6,9 +6,9 @@ alwaysApply: false
 # OrderFlow — Session State
 
 ## Status
-- **Last completed step:** Step 3 (schema.mdc LOCKED)
-- **Current in-progress:** Step 4 — Workspace setup (reviewer.mdc + tooling)
-- **Next immediate action:** Create reviewer.mdc; fold Step 4.5 into a lightweight local deploy contract; then Step 5 (M1)
+- **Last completed step:** Step 3 (schema.mdc LOCKED). Step 4 + 4.5 drafted (reviewer.mdc, deployment.mdc), awaiting confirm.
+- **Current in-progress:** Step 4/4.5 review gate
+- **Next immediate action:** On approval, commit Step 4/4.5 and start Step 5 — Milestone 1 (order-service + inventory-service, 1-step saga + compensation, Docker Compose infra)
 
 ## Locked artifacts
 - `features.mdc` — LOCKED (16 features, F-01..F-16, mapped to M1–M4)
@@ -16,6 +16,8 @@ alwaysApply: false
 - `architecture.mdc` — LOCKED (orchestration, clean-but-pragmatic layering)
 - `decisions.mdc` — LOCKED (D-01..D-18; D-14/15/16 = approved deviations)
 - `schema.mdc` — LOCKED
+- `reviewer.mdc` — LOCKED (review checklist)
+- `deployment.mdc` — LOCKED (local Docker Compose contract)
 
 ## Decisions made this session
 - Build tool: Maven multi-module monorepo + shared `common` module

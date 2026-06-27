@@ -1,0 +1,45 @@
+---
+description: Review checklist for OrderFlow. Run against git diff before every commit/gate.
+alwaysApply: false
+status: LOCKED — 2026-06-27
+---
+
+# OrderFlow — Reviewer Checklist
+
+Run against `git diff HEAD` before marking any feature DONE or committing at a gate.
+Adapted from workflow Step 4 for this project (no-auth, saga, Kafka).
+
+## Architecture & layering
+- [ ] No business logic in controllers / Kafka listeners — they validate + delegate to a service.
+- [ ] No DB access outside the repository layer.
+- [ ] DTOs validated at the boundary (controller), not inside services.
+- [ ] No deviation from `architecture.mdc` layer boundaries.
+- [ ] **Zero cross-schema queries** — each service touches only its own schema.
+- [ ] Services never call each other directly — only via Kafka command/event topics.
+- [ ] Saga logic lives only in order-service (participants contain no saga logic).
+
+## Correctness (saga-specific)
+- [ ] State transitions go through the sealed-interface state machine (no ad-hoc status writes).
+- [ ] Every consumer + compensation is **idempotent** (natural key / inbox) — proven by a replay test.
+- [ ] Compensations run in **reverse** completed-step order.
+- [ ] Saga state changes + outbox row written in the **same transaction**.
+- [ ] Optimistic-lock (`@Version`) conflicts handled/retried where concurrent writes occur.
+
+## Contracts & errors
+- [ ] Error responses match the locked envelope in `schema.mdc`.
+- [ ] Kafka messages match the locked envelope/types in `schema.mdc` (shared `common` module).
+- [ ] A failed saga step is surfaced via state + SSE, NOT as an HTTP 5xx.
+
+## Security & config
+- [ ] No secrets/credentials in code or committed config (`.env` git-ignored; `.env.example` only).
+- [ ] Auth: v1 has none by decision (D-16) — confirm no endpoint silently assumes auth.
+
+## Tests & quality
+- [ ] Every new service method has at least one unit test (Mockito for `CommandPublisher`/`SagaLock`/repos).
+- [ ] Integration test for the happy path passes (TestContainers: real PG/Kafka/Redis).
+- [ ] Formatter/linter clean (Spotless + Checkstyle); build green (`mvn verify`).
+- [ ] No new external dependency without a new `decisions.mdc` entry.
+
+## Hygiene
+- [ ] `session-state.mdc` updated (feature ledger + last step + next action).
+- [ ] No `# F-XX` comment pointing at unfinished work in another feature (cross-feature scan).
