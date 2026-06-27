@@ -1,0 +1,200 @@
+---
+description: Locked feature set for OrderFlow (v1). Source of truth for scope.
+alwaysApply: false
+status: LOCKED — 2026-06-27
+---
+
+# OrderFlow — Features (v1)
+
+> **Project:** Distributed order-fulfillment engine. Headline pattern: **Saga
+> orchestrator with compensating transactions** (orchestration, not choreography).
+> Saga logic lives in **one place**: order-service, as a state machine.
+> **Goal:** interview-defensible depth, not breadth.
+
+## Milestone ↔ Workflow mapping
+
+These milestones are **Step 5 delivery slices** (each a STOP-and-evaluate gate).
+Planning Steps 0–4.5 lock the *whole system's* contracts up front; milestones then
+build it in working, demoable slices.
+
+| Milestone | Slice | Features |
+|---|---|---|
+| **M1** | order + inventory, 1-step saga + compensation proof | F-01, F-02, F-03, F-04, F-05, F-06, F-07 |
+| **M2** | + payment, 2-step saga, cascading rollback | F-08, F-09 |
+| **M3** | + shipment, 3-step saga, circuit breaker | F-10, F-11, F-12 |
+| **M4** | dashboard + observability + demo | F-13, F-14, F-15, F-16 |
+
+---
+
+## Core (building now)
+
+### F-01 — Place Order API  · P0 · M1
+Customer submits an order; order-service creates a durable saga instance and starts
+the saga asynchronously.
+**Acceptance criteria**
+- `POST /api/orders` accepts `{ customerId, items:[{sku, qty}], amount }`, returns `201`
+  with `{ orderId, status }` where initial status = `ORDER_PLACED`.
+- Invalid payload (missing items, qty ≤ 0, amount ≤ 0) → `400` with the locked error shape.
+- A `saga_instance` row is persisted **before** any command is published.
+- `GET /api/orders/{id}` returns current saga state + per-step status.
+- `GET /api/orders` returns recent orders (paginated) for the dashboard table.
+
+### F-02 — Idempotent order submission  · P0 · M1
+Duplicate submissions (client retry) must not create duplicate orders/sagas.
+**Acceptance criteria**
+- `Idempotency-Key` header required on `POST /api/orders`.
+- Same key + same body within TTL → returns the **original** `201` response, no new saga.
+- Same key + **different** body → `409` conflict (locked error shape).
+- Implemented with a Redis key (TTL configurable; default 24h). Verified by a test
+  firing the same key twice and asserting one `saga_instance` row.
+- **.NET note:** equivalent to an idempotency filter/middleware backed by `IDistributedCache`.
+
+### F-03 — Saga state machine (sealed-interface model)  · P0 · M1
+The saga modeled as a **sealed interface** with pattern-matched transitions.
+**Acceptance criteria**
+- States: `OrderPlaced → InventoryReserved → PaymentCaptured → ShipmentInitiated →
+  OrderConfirmed`, plus `Compensating` and `OrderFailed`.
+- Transitions implemented with Java 21 **pattern-matched `switch`** over the sealed type;
+  illegal transitions rejected (logged + no state change).
+- Saga state is **durable in Postgres** (system of record), not Redis.
+- Each transition writes a `saga_step` audit row (step, status, timestamp, correlationId).
+- Unit tests cover every legal transition and at least 3 illegal ones.
+- **.NET note:** sealed interface + record states ≈ a discriminated-union-style state
+  type; pattern `switch` ≈ C# `switch` expression on a closed hierarchy.
+
+### F-04 — Reserve inventory step (inventory-service)  · P0 · M1
+On `ReserveInventoryCommand`, inventory-service reserves stock and replies.
+**Acceptance criteria**
+- Consumes `ReserveInventoryCommand`; decrements available stock atomically if `qty`
+  available; publishes `InventoryReservedEvent` (success) or `InventoryReservationFailedEvent`.
+- Insufficient stock → failure event (no negative stock, enforced at DB level).
+- Reservation is **idempotent** by `(orderId, sku)` — a redelivered command does not
+  double-reserve (verified by replaying the same command).
+- Lives only in `inventory` schema; zero cross-schema access.
+
+### F-05 — Release inventory compensation (idempotent)  · P0 · M1
+The compensating action that undoes a reservation.
+**Acceptance criteria**
+- Consumes `ReleaseInventoryCommand`; restores reserved stock; publishes
+  `InventoryReleasedEvent`.
+- **Idempotent:** a retried release for an already-released reservation is a no-op
+  (stock does not increase twice). Verified by replaying the command and asserting
+  the stock count is unchanged on the second run.
+- Release is itself a normal forward operation ("do the opposite"), not a DB rollback.
+
+### F-06 — Orchestrated compensation flow  · P0 · M1
+On a step failure, the orchestrator runs compensations **in reverse order** of
+completed steps and lands in `OrderFailed`.
+**Acceptance criteria**
+- M1 scope: order fails at/after inventory → if inventory was reserved, a release is
+  issued; saga ends in `OrderFailed`; if nothing was reserved, no compensation issued.
+- Compensation actions are driven by the orchestrator (commands), never by services
+  calling each other.
+- Demo-provable: forcing a failure shows the reserved stock returning to its prior count.
+
+### F-07 — Reliable command publishing via Outbox  · P0 · M1
+order-service publishes commands/events reliably using the **outbox pattern**.
+**Acceptance criteria**
+- State change + outbox row are written in the **same DB transaction**.
+- A scheduled **relay poller** publishes unsent outbox rows to Kafka, marks them sent,
+  and is safe to run repeatedly (at-least-once; consumers are idempotent).
+- Kill the app between commit and publish → on restart the relay still publishes the row
+  (verified by an integration test / documented manual step).
+- **.NET note:** transactional outbox ≈ the same pattern you'd hand-roll or get from
+  MassTransit's outbox; relay poller ≈ a `BackgroundService`.
+
+### F-08 — Capture payment step + refund compensation (payment-service)  · P0 · M2
+**Acceptance criteria**
+- Consumes `CapturePaymentCommand`; publishes `PaymentCapturedEvent` or
+  `PaymentFailedEvent`.
+- Consumes `RefundPaymentCommand`; publishes `PaymentRefundedEvent`.
+- Refund is **idempotent** by `(orderId)` — retried refund does not double-refund.
+- Single concern: capture/refund only (no full payment engine).
+
+### F-09 — Two-step cascading rollback  · P0 · M2
+Payment failure after inventory reservation triggers inventory release.
+**Acceptance criteria**
+- Sequence proven: `InventoryReserved` → payment fails → `Compensating` → inventory
+  released → `OrderFailed`.
+- Compensations run in reverse completed-step order (payment first if captured, then
+  inventory).
+- Stock visibly returns to pre-order count; no payment remains captured.
+
+### F-10 — Initiate/cancel shipment step (shipment-service)  · P0 · M3
+**Acceptance criteria**
+- Consumes `CreateShipmentCommand`; calls a **mock carrier**; publishes
+  `ShipmentInitiatedEvent` or `ShipmentFailedEvent`.
+- Consumes `CancelShipmentCommand`; cancels the label; publishes `ShipmentCancelledEvent`.
+- Cancel is idempotent by `(orderId)`.
+
+### F-11 — Circuit breaker around mock carrier (Resilience4j)  · P0 · M3
+**Acceptance criteria**
+- Carrier calls wrapped in a Resilience4j **circuit breaker** (+ timeout; retry optional).
+- When the mock carrier is down/hanging, the breaker **opens**, the saga compensates
+  (refund payment + release inventory), order → `OrderFailed`.
+- Bring the carrier back → breaker transitions `OPEN → HALF_OPEN → CLOSED` and new orders
+  succeed again. Breaker state observable (logs/metrics).
+- **.NET note:** Resilience4j CircuitBreaker ≈ **Polly** `CircuitBreakerPolicy`; bulkhead/
+  timeout ≈ Polly `Bulkhead`/`Timeout`.
+
+### F-12 — Full three-step saga + reverse compensation  · P0 · M3
+**Acceptance criteria**
+- Happy path: inventory → payment → shipment → `OrderConfirmed`.
+- Failure at shipment compensates **payment then inventory** (reverse order).
+- All compensations idempotent under redelivery.
+
+### F-13 — Live dashboard (React + SSE)  · P0 · M4
+Single-page live order table.
+**Acceptance criteria**
+- Order table updates **live** via SSE from order-service; each row shows per-step status
+  (inventory / payment / shipment) + overall saga state with semantic color badges.
+- New orders and state transitions appear without manual refresh; SSE auto-reconnects.
+- "Place order" control to submit demo orders.
+- Follows `ui-style.mdc` (dark mode, Inter, shadcn/Tailwind, skeleton loaders, branding).
+
+### F-14 — Mock failure injection  · P0 · M2 (payment) / M3 (shipment)
+Built in from the start to drive the demo.
+**Acceptance criteria**
+- payment-service: configurable rejection (special amount value and/or header) → triggers
+  `PaymentFailedEvent`.
+- shipment-service: configurable **fail** or **hang** (delay) mode → trips the breaker.
+- Injection controllable per-request (header) and/or via config; documented in demo script.
+
+### F-15 — Distributed tracing + metrics  · P1 · M4
+**Acceptance criteria**
+- OpenTelemetry traces span all 4 services for one order (trace visible in **Zipkin**),
+  including across Kafka command/result hops (correlationId propagated).
+- Micrometer metrics scraped by **Prometheus**; a **Grafana** dashboard shows orders/sec,
+  success/failure, and circuit-breaker state.
+
+### F-16 — Demo script (4 scenarios) + run docs  · P0 · M4
+**Acceptance criteria**
+- One command (`docker compose up`) brings up Postgres, Kafka (KRaft), Redis, all 4
+  services, dashboard, Zipkin, Prometheus, Grafana.
+- Documented, repeatable script for: (1) happy path, (2) payment failure → inventory
+  released, (3) shipment down → breaker trips → refund+release → recovery,
+  (4) ~20 concurrent orders for limited stock with correct partial success + compensation.
+
+---
+
+## Extensible (future — NOT building now)
+
+- **Choreography variant** — contrast doc/branch showing event-driven (no central
+  orchestrator) for interview discussion. *Now:* keep saga logic isolated behind an
+  orchestrator interface so an alt driver is conceivable.
+- **Database-per-service (true isolation)** — split the single Postgres into 4 instances.
+  *Now:* per-service schema + per-service DB user so the seam already exists.
+- **Saga timeouts / dead-letter + manual intervention queue** for stuck sagas.
+  *Now:* persist step timestamps + correlationId so a timeout sweeper can be added.
+- **Real payment/carrier integrations** replacing mocks.
+- **Auth + multi-tenant** (out of scope for the local demo).
+- **Event sourcing** of saga state (currently state + audit log, not full ES).
+- **Horizontal scaling / partitioned consumers** with consumer-group rebalancing demo.
+
+---
+
+## Out of scope (explicitly not v1)
+- Authentication / authorization, multi-tenancy, offline support.
+- LLM/AI features (workflow's Gemini layer is N/A for this project — see decisions.mdc).
+- Cloud hosting (all-local Docker Compose — see decisions.mdc).
+- Order editing, cancellation-after-confirm, returns, partial fulfillment.
