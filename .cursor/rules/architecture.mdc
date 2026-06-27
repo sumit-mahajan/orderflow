@@ -1,0 +1,184 @@
+---
+description: Locked architecture for OrderFlow. Layer boundaries enforced in review.
+alwaysApply: false
+status: LOCKED — 2026-06-27
+---
+
+# OrderFlow — Architecture
+
+> 4 microservices, **saga orchestration** (not choreography). Saga logic lives only in
+> order-service as a durable state machine. Services communicate **only via Kafka**;
+> never direct calls. One Postgres, four schemas, strict isolation.
+
+## 1. System topology
+
+```
+                    ┌──────────────────────────────────────────┐
+   React dashboard  │            order-service                  │
+   ──SSE◄───────────┤  REST API · SSE · Saga orchestrator       │
+   ──POST /orders──►│  state machine · Outbox + relay poller    │
+                    └───┬───────────────▲──────────────────────┘
+                        │ commands       │ result events
+                        ▼ (Kafka)        │ (Kafka)
+        ┌───────────────┬───────────────┬───────────────┐
+        ▼               ▼               ▼
+  inventory-service  payment-service  shipment-service
+  reserve/release    capture/refund   create/cancel + mock carrier
+        │               │               │  (Resilience4j CB)
+        └──── all four share ONE Postgres, separate schemas ─────┘
+        order │ inventory │ payment │ shipment   (per-service DB user)
+
+Infra: Postgres · Kafka (KRaft) · Redis · Zipkin · Prometheus · Grafana  (Docker Compose)
+```
+
+- **order-service** = orchestrator: owns saga state machine, drives step sequence, triggers
+  compensations in reverse order, exposes order API + SSE, runs the outbox relay.
+- **inventory/payment/shipment** = participants: consume their commands, do one concern,
+  publish result events. They contain **no saga logic**.
+
+## 2. Backend — Clean Architecture layers (per service)
+
+Each service is a Maven module with the same layered shape. Dependencies point **inward**
+only (Infrastructure → Adapters → Use Cases → Entities).
+
+| Layer | Contains | OrderFlow examples | .NET analogy |
+|---|---|---|---|
+| **Entities (domain)** | Pure domain types + invariants. No framework imports. | Saga sealed interface + state records, `Order`, `InventoryItem`, money/qty value objects, domain events (records) | POCOs / domain model, no EF/ASP.NET refs |
+| **Use Cases (application)** | Business logic + transaction boundaries. Uses repositories directly; a couple of thin interfaces where they aid testing (`CommandPublisher`, `SagaLock`). | `PlaceOrderService`, `SagaOrchestrator`, `ReserveInventoryService` | Application/service layer |
+| **Interface Adapters** | Controllers, Kafka listeners, DTOs + mappers, Spring Data repositories, presenters (SSE) | `OrderController`, `*KafkaListener`, `*Request/*Response` records, `OrderRepository`, `SseOrderPresenter` | Controllers, mappers, EF repositories |
+| **Infrastructure** | Frameworks/drivers config: Spring config, Kafka/Redis/JPA wiring, Flyway, Resilience4j config, OTel | `KafkaConfig`, `RedisConfig`, `Resilience4jConfig`, Flyway migrations, `application.yml` | `Program.cs`/DI registration, provider config |
+
+**Boundary rules (enforced by `reviewer.mdc`):**
+- No business logic in controllers/listeners — they map + delegate to a service/use case.
+- No DB access outside the repository layer.
+- DTOs validated at the boundary (controller), never inside services.
+- Domain types stay free of web/Kafka concerns.
+
+**Persistence (idiomatic Spring, beginner-friendly):**
+- One interface per aggregate: `OrderRepository extends JpaRepository<OrderEntity, UUID>` —
+  Spring Data **auto-implements** it. No `Impl` class, no adapter, no hidden interface.
+- Name is tech-neutral (`OrderRepository`, not `JpaOrderRepository`); swapping persistence
+  later means editing this one interface. Pragmatic over pure — readability first.
+- Custom queries via derived method names (`findByOrderId`) or `@Query` when needed.
+
+### Key Spring idioms (with .NET equivalents)
+- **Constructor injection** for all dependencies (no field `@Autowired`). ≈ ctor injection in .NET DI.
+- **`@Transactional`** marks the use-case transaction boundary. ≈ `TransactionScope` / a single `SaveChanges`. Outbox row + state change share one `@Transactional` method.
+- **Spring Data JPA repositories** (interfaces, auto-implemented). ≈ EF Core `DbContext` + repository.
+- **`@KafkaListener`** = a consumer method. ≈ a `BackgroundService` Confluent consumer loop.
+- **`@Scheduled`** for the outbox relay. ≈ `BackgroundService` + `PeriodicTimer`.
+- **Records** for DTOs/events = immutable data carriers. ≈ C# `record`.
+- **Sealed interface** for saga state = closed type hierarchy. ≈ closed class hierarchy / DU-style.
+
+## 3. Frontend — feature-based structure (M4)
+
+```
+frontend/src/
+  features/orders/
+    pages/        DashboardPage, OrderDetailPage
+    components/    OrderTable, OrderRow, StepBadge, StatStrip, DemoControls, SagaTimeline
+    hooks/         useOrderStream (SSE), usePlaceOrder, useOrders
+    store/         orders store (state, reducers)
+    services/      ordersApi (REST), orderStream (EventSource wrapper)
+    types/         Order, SagaState, StepStatus (TS mirrors of backend records)
+  components/ui/   shadcn primitives (button, badge, card, table, drawer, toast)
+  lib/            cn(), theme, formatters
+  app/            router, providers, layout (header + ThemeToggle)
+```
+Per-feature: pages / components / hooks / store / services. See `ui-style.mdc` for visuals.
+
+## 4. Auth strategy
+- **None for v1.** Local demo tool; order API and dashboard are open. (Deviation from
+  workflow Step 1.5/2 + reviewer "auth checks" item — recorded in `decisions.mdc`.)
+- Seam left for later: all writes go through controllers where an auth filter could attach;
+  reviewer checklist item reads "auth where required" → for v1, **none required**, noted per endpoint in `schema.mdc`.
+
+## 5. Error handling & structured logging
+- **Consistent error envelope** across all services (locked shape goes in `schema.mdc`):
+  `{ "timestamp", "status", "error", "message", "path", "correlationId" }`.
+- Spring **`@RestControllerAdvice`** (global exception handler) maps exceptions → the envelope.
+  ≈ ASP.NET Core exception-handling middleware / `IExceptionHandler`.
+- Domain/validation errors → `400/409`; not-found → `404`; unexpected → `500` (no stack
+  trace leaked to client; logged server-side with correlationId).
+- **Saga-level errors are not HTTP errors** — a failed step is a normal business outcome that
+  drives the saga into `Compensating`/`OrderFailed`, surfaced via state + SSE, not a 5xx.
+- **Structured JSON logging** (Logback JSON encoder). Every log line carries
+  `correlationId` (= orderId/sagaId) and `traceId`/`spanId` (from OTel MDC) so a single
+  order is greppable across all 4 services. ≈ Serilog structured logging + enrichers.
+
+## 6. Observability plan (F-15, P1)
+- **Tracing:** OpenTelemetry SDK + Micrometer Tracing bridge; export to **Zipkin**. One
+  trace spans all 4 services for an order, including **across Kafka hops** (trace context
+  propagated in Kafka headers; correlationId = business key alongside W3C traceparent).
+- **Metrics:** Micrometer → **Prometheus** scrape endpoint per service. Track: orders
+  placed/confirmed/failed counters, saga step durations (timers), compensation count,
+  **circuit-breaker state/gauge** (Resilience4j Micrometer binder), Kafka consumer lag.
+- **Dashboards:** a **Grafana** board (orders/sec, success vs failure, breaker state, p95
+  step latency). Provisioned via Docker Compose config.
+- **How errors surface locally:** structured logs (correlationId), Zipkin trace with the
+  failed span flagged, breaker-open metric, and the dashboard row turning red/violet.
+- ≈ .NET: OpenTelemetry .NET exporter + `System.Diagnostics.Metrics`/`Meter`; Polly exposes
+  breaker metrics similarly.
+
+## 7. LLM integration layer
+- **N/A for OrderFlow.** No AI features. (Deviation from workflow Step 2 — recorded in
+  `decisions.mdc`. No Gemini/fallback layer is built.)
+
+## 8. Concurrency & reliability (what is actually implemented + known gaps)
+
+**Implemented:**
+- **Messaging delivery = at-least-once.** Kafka commands/events may be redelivered;
+  **all consumers are idempotent** (F-04/05/08/10), keyed by `(orderId[,sku])`, so
+  redelivery is safe. We do **not** rely on exactly-once semantics.
+- **Outbox pattern (F-07):** state change + outbox row in one `@Transactional`. A
+  **scheduled relay poller** publishes unsent rows (at-least-once) and marks them sent.
+  Survives a crash between commit and publish.
+- **Multi-instance outbox relay:** `SELECT … FOR UPDATE SKIP LOCKED` so concurrent relays
+  grab disjoint batches; duplicates are harmless because consumers are idempotent.
+- **Saga transition guarding:** **Redis distributed lock** per `orderId` around a transition
+  **+ Postgres optimistic locking** (`@Version` column on the saga row). The DB version is
+  the real safety net; the Redis lock reduces contention/wasted work.
+- **Saga state durability:** Postgres is the **system of record** (`saga_instance` +
+  `saga_step` audit). Redis holds only idempotency keys + transient locks.
+- **Compensation:** orchestrator issues compensating commands in **reverse** completed-step
+  order; each compensation is idempotent (a retried release/refund/cancel is a no-op).
+- **Circuit breaker (F-11):** Resilience4j around the mock carrier (timeout + breaker; retry
+  optional). Open breaker → fast-fail → saga compensates. ≈ Polly circuit breaker.
+- **Kafka scaling:** per-service **consumer groups**; partitions key by `orderId` so all
+  events for one order keep per-partition ordering and hit the same consumer.
+- **Virtual threads (Java 21):** used for SSE connection handling and any orchestrator
+  fan-out/waits to cheaply hold many concurrent I/O-bound tasks. ≈ closer to async/await
+  ergonomics than raw threads.
+
+**Known gaps (documented, not hidden):**
+- **No saga timeout/stuck-saga sweeper** in v1 — a participant that never replies leaves a
+  saga in-progress. Timestamps + correlationId are persisted so a sweeper can be added
+  later (extensible). Documented as a gap.
+- **Single Postgres instance** = shared infra blast radius (vs true DB-per-service). Logical
+  isolation only (schema + per-service user). Conscious trade-off for the demo.
+- **Virtual threads don't make blocking JPA/Kafka non-blocking** — they help concurrency, not
+  raw latency. Noted so it isn't oversold.
+- **SSE multi-instance fan-out** not built in v1 (single order-service instance). Scale-up
+  path: each instance consumes the saga-events topic (or Redis pub/sub) to fan out to its
+  local SSE clients. Documented.
+- **Exactly-once not attempted** — at-least-once + idempotency is the deliberate posture.
+
+## 9. Kafka topic & schema conventions
+- Topics: `orderflow.commands.<service>` (e.g. `orderflow.commands.inventory`) and
+  `orderflow.events.<service>` (results). Orchestrator publishes commands, consumes events.
+- Message envelope (record): `{ correlationId(orderId), sagaId, type, occurredAt, payload }`
+  + W3C `traceparent` in Kafka headers.
+- Keyed by `orderId` for partition-ordering.
+- Versioning: additive fields only in v1; consumers tolerate unknown fields.
+
+## 10. Tech mapping summary (Spring/Java ⇄ .NET)
+| Concern | OrderFlow (Java/Spring) | .NET equivalent |
+|---|---|---|
+| Resilience | Resilience4j | Polly |
+| ORM / migrations | Spring Data JPA + Hibernate / Flyway | EF Core / EF Migrations or DbUp |
+| Tx boundary | `@Transactional` | `TransactionScope` / `SaveChanges` |
+| Background work | `@Scheduled`, `@KafkaListener` | `BackgroundService`, hosted consumers |
+| Metrics/tracing | Micrometer + OTel | `System.Diagnostics` + OTel .NET |
+| Web host | Spring Boot embedded Tomcat/Netty | ASP.NET Core / Kestrel |
+| DI | Spring context, ctor injection | built-in `IServiceCollection` |
+| Outbox | hand-rolled + relay poller | MassTransit outbox / hand-rolled |

@@ -1,0 +1,153 @@
+---
+description: Decision log for OrderFlow. Every non-obvious choice + rejected alternatives.
+alwaysApply: false
+status: LOCKED — 2026-06-27 (append-only; new decisions add new IDs)
+---
+
+# OrderFlow — Decisions
+
+Format: Decision / Context / Alternatives considered / Rejected because.
+
+---
+
+### D-01 — Orchestration, not choreography
+- **Decision:** Centralize saga logic in order-service as a state machine; services react to
+  commands and emit results, never call each other.
+- **Context:** Headline interview pattern; saga logic must be defensible "in one place."
+- **Alternatives considered:** Event choreography (each service listens + reacts).
+- **Rejected because:** Choreography scatters the saga across services — hard to reason about,
+  hard to whiteboard, compensation order becomes emergent. Orchestration makes the state
+  machine explicit. (Choreography kept as an extensible contrast doc.)
+
+### D-02 — Saga state durable in Postgres (system of record); not Redis, not full ES
+- **Decision:** Persist `saga_instance` (current state + version) + `saga_step` audit rows in
+  Postgres. Redis holds only idempotency keys + transient locks.
+- **Context:** State must survive crashes and be queryable for the dashboard.
+- **Alternatives considered:** Redis as state store; full event sourcing of saga.
+- **Rejected because:** Redis isn't a durable system of record (eviction/persistence caveats).
+  Full ES adds rebuild/projection complexity beyond v1's needs — state + audit log gives the
+  timeline without ES machinery. (ES parked as extensible.)
+
+### D-03 — Saga state = sealed interface + pattern-matched switch (Java 21)
+- **Decision:** Model states as a sealed interface with record implementations; transitions via
+  exhaustive pattern `switch`.
+- **Context:** Want compile-checked, closed state set; the interview centerpiece.
+- **Alternatives considered:** Enum + transition table; string status column only.
+- **Rejected because:** Enum can't carry per-state data; bare string has no compile safety.
+  Sealed interface gives exhaustiveness + payload per state. (≈ C# closed hierarchy / DU.)
+
+### D-04 — One Postgres, four schemas, per-service DB user (not DB-per-service)
+- **Decision:** Single Postgres; schemas `order`/`inventory`/`payment`/`shipment`; each service
+  connects with a user scoped to its own schema; zero cross-schema queries.
+- **Context:** Keep "database per service" isolation semantics locally without 4 DB containers.
+- **Alternatives considered:** True DB-per-service (4 instances); shared schema.
+- **Rejected because:** 4 instances = heavier local footprint for no demo benefit; shared schema
+  destroys isolation. Per-service user enforces the seam by permissions. Trade-off (shared blast
+  radius) documented in architecture §8. (DB-per-service parked as extensible.)
+
+### D-05 — Kafka in KRaft mode (no Zookeeper)
+- **Decision:** Run Kafka in KRaft mode.
+- **Context:** Modern Kafka; fewer moving parts locally.
+- **Alternatives considered:** Kafka + Zookeeper; Redis Streams; RabbitMQ.
+- **Rejected because:** Zookeeper is legacy/extra container. Redis Streams/RabbitMQ are viable but
+  Kafka's partitioned log + consumer groups + replay are the interview-relevant primitives.
+
+### D-06 — Outbox pattern + scheduled relay poller (not Debezium, not direct publish)
+- **Decision:** Write business state + outbox row in one tx; a `@Scheduled` relay publishes
+  unsent rows to Kafka and marks them sent. Multi-instance safe via `FOR UPDATE SKIP LOCKED`.
+- **Context:** Dual-write problem — can't atomically commit DB + publish to Kafka.
+- **Alternatives considered:** Direct publish after commit; Debezium CDC on the WAL.
+- **Rejected because:** Direct publish loses messages if the app dies post-commit/pre-publish.
+  Debezium is the realistic scale path but heavy to run locally. Poller is simple + defensible;
+  Debezium noted as the scale-up swap. (≈ MassTransit outbox.)
+
+### D-07 — At-least-once delivery + idempotent consumers (not exactly-once)
+- **Decision:** Accept Kafka redelivery; make every consumer + compensation idempotent
+  (keyed by `(orderId[,sku])`).
+- **Context:** Exactly-once across services is complex/fragile; idempotency is robust.
+- **Alternatives considered:** Kafka EOS/transactions for exactly-once.
+- **Rejected because:** EOS adds coordination cost and still needs idempotency at boundaries;
+  idempotency alone is simpler and the industry-standard posture.
+
+### D-08 — Saga transition guard: Redis distributed lock + Postgres optimistic version
+- **Decision:** Per-`orderId` Redis lock around a transition; `@Version` optimistic locking on the
+  saga row as the real safety net.
+- **Context:** Concurrent events/instances must not corrupt saga state (drives 20-order demo).
+- **Alternatives considered:** DB optimistic only; Redis lock only; DB pessimistic `SELECT FOR UPDATE`.
+- **Rejected because:** Redis-lock-only is unsafe if the lock is lost (Redis not source of truth).
+  DB-only works but wastes work on contended retries. Pessimistic locking serializes too hard.
+  Lock (reduce contention) + version (correctness) is belt-and-suspenders and explainable.
+
+### D-09 — Redis idempotency keys on the order API (separate from compensation idempotency)
+- **Decision:** `Idempotency-Key` header dedups order submissions via a Redis key (TTL 24h);
+  compensation idempotency is a *separate* mechanism keyed by saga step.
+- **Context:** Client retries must not create duplicate orders; retried compensations must not
+  double-undo.
+- **Alternatives considered:** Single dedup mechanism; DB unique constraint only.
+- **Rejected because:** They're different concerns (API-level vs message-level); conflating them
+  muddies the design. Keeping them distinct is clearer to defend.
+
+### D-10 — Resilience4j circuit breaker around the mock carrier
+- **Decision:** Wrap shipment-service's carrier call in a Resilience4j circuit breaker + timeout.
+- **Context:** Demo scenario 3 (shipment down → breaker trips → compensate → recover).
+- **Alternatives considered:** Manual try/catch + retry; Spring Retry only.
+- **Rejected because:** Hand-rolled breakers miss half-open/state metrics; Spring Retry lacks the
+  breaker state machine. Resilience4j is the standard (≈ Polly).
+
+### D-11 — SSE over WebSocket for the dashboard
+- **Decision:** Server-Sent Events for live order updates.
+- **Context:** Updates are one-directional (server→browser).
+- **Alternatives considered:** WebSocket; polling.
+- **Rejected because:** WebSocket is bidirectional overkill (no client→server stream needed);
+  polling is wasteful and not "live." SSE auto-reconnects and is simplest. Multi-instance SSE
+  fan-out documented as a gap/scale path.
+
+### D-12 — Maven multi-module monorepo
+- **Decision:** One parent POM + per-service modules + shared `common` module (envelopes, error
+  shape, OTel config).
+- **Context:** Shared dependency management + consistent build; closest to .csproj/.sln mental model.
+- **Alternatives considered:** Gradle multi-module; four separate repos.
+- **Rejected because:** Separate repos complicate local dev + shared contracts. Gradle is fine but
+  Maven's declarative POM is easier to read/defend; user defaulted to Maven.
+
+### D-13 — Java 21 virtual threads, scoped to I/O concurrency
+- **Decision:** Use virtual threads for SSE connections + orchestrator I/O-bound waits/fan-out.
+- **Context:** Cheap concurrency for many simultaneous orders/connections.
+- **Alternatives considered:** Platform thread pools; reactive (WebFlux) end-to-end.
+- **Rejected because:** Fixed pools cap concurrency; full reactive adds cognitive cost across the
+  stack. Virtual threads give simple blocking-style code at scale. Caveat documented: they don't
+  make blocking JPA/Kafka non-blocking.
+
+### D-14 — All-local Docker Compose (DEVIATION from workflow Step 4.5 cloud targets)
+- **Decision:** Everything runs locally via Docker Compose; no Vercel/Render/Neon/Pinecone/Gemini.
+- **Context:** Spec mandates local-only, no cloud, no paid services; one local Postgres.
+- **Alternatives considered:** Workflow's free-tier cloud stack.
+- **Rejected because:** Conflicts with the explicit local-only requirement; cloud adds cold-start/
+  config noise irrelevant to the saga demo. **User-approved deviation.**
+
+### D-15 — No LLM layer (DEVIATION from workflow Step 2)
+- **Decision:** Omit the Gemini/LLM integration layer entirely.
+- **Context:** OrderFlow has no AI features.
+- **Alternatives considered:** Build a stub LLM layer to satisfy the template.
+- **Rejected because:** Dead code with no purpose. **User-approved deviation.**
+
+### D-16 — No auth / no landing page (DEVIATION from workflow Step 1.5/2)
+- **Decision:** Open order API + single dashboard at `/`; no auth, no marketing landing page.
+- **Context:** Local ops/demo tool; auth/multitenancy explicitly out of scope.
+- **Alternatives considered:** Add JWT auth + public landing per workflow defaults.
+- **Rejected because:** Scope not in the spec; distracts from the saga focus. Seam left for later.
+  **User-approved deviation.**
+
+### D-17 — Flyway migrations, per-schema (carry-over best practice)
+- **Decision:** Flyway manages each schema's migrations; versioned SQL committed to the repo.
+- **Context:** Reproducible schema across containers/tests.
+- **Alternatives considered:** Hibernate `ddl-auto`; Liquibase.
+- **Rejected because:** `ddl-auto` is unsafe/non-reproducible for anything real; Liquibase XML is
+  heavier than Flyway SQL. (≈ EF Migrations / DbUp.)
+
+### D-18 — TestContainers for integration tests
+- **Decision:** Spin real Postgres/Kafka/Redis in tests via TestContainers; JUnit 5 + Mockito for units.
+- **Context:** Saga + outbox + idempotency need real infra to prove correctness.
+- **Alternatives considered:** Embedded/in-memory fakes (H2, embedded Kafka).
+- **Rejected because:** In-memory substitutes diverge from real behavior (esp. Kafka/Postgres
+  semantics), giving false confidence. (≈ Testcontainers for .NET.)
