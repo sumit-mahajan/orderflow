@@ -1,0 +1,63 @@
+---
+description: Live build state for OrderFlow. Read at session start; update at session end.
+alwaysApply: false
+---
+
+# OrderFlow — Session State
+
+## Status
+- **Last completed step:** Step 3 (schema.mdc LOCKED)
+- **Current in-progress:** Step 4 — Workspace setup (reviewer.mdc + tooling)
+- **Next immediate action:** Create reviewer.mdc; fold Step 4.5 into a lightweight local deploy contract; then Step 5 (M1)
+
+## Locked artifacts
+- `features.mdc` — LOCKED (16 features, F-01..F-16, mapped to M1–M4)
+- `ui-style.mdc` — LOCKED (single dashboard, no landing/auth deviation)
+- `architecture.mdc` — LOCKED (orchestration, clean-but-pragmatic layering)
+- `decisions.mdc` — LOCKED (D-01..D-18; D-14/15/16 = approved deviations)
+- `schema.mdc` — LOCKED
+
+## Decisions made this session
+- Build tool: Maven multi-module monorepo + shared `common` module
+- Concurrency guard: Redis lock + Postgres `@Version` optimistic locking
+- Outbox: scheduled relay poller (`FOR UPDATE SKIP LOCKED`), not Debezium
+- Dashboard transport: SSE
+- Frontend: dashboard at `/`, no auth, no landing page
+- Deviations approved: no LLM layer, all-local Docker Compose, no auth/landing
+- Persistence style: idiomatic Spring Data (`OrderRepository`), no adapter boilerplate
+- Delivery: virtual threads scoped to SSE + orchestrator I/O; at-least-once + idempotency
+
+## Milestone progress (Step 5)
+- M1 (order + inventory, 1-step saga + compensation): NOT STARTED
+- M2 (+ payment, cascading rollback): NOT STARTED
+- M3 (+ shipment, circuit breaker): NOT STARTED
+- M4 (dashboard + observability + demo): NOT STARTED
+
+## Feature status (Feature Completion Gate ledger)
+| ID | Feature | Milestone | Status |
+|----|---------|-----------|--------|
+| F-01 | Place Order API | M1 | NOT STARTED |
+| F-02 | Idempotent submission | M1 | NOT STARTED |
+| F-03 | Saga state machine | M1 | NOT STARTED |
+| F-04 | Reserve inventory | M1 | NOT STARTED |
+| F-05 | Release inventory (compensation) | M1 | NOT STARTED |
+| F-06 | Orchestrated compensation | M1 | NOT STARTED |
+| F-07 | Outbox publishing | M1 | NOT STARTED |
+| F-08 | Capture/refund payment | M2 | NOT STARTED |
+| F-09 | Two-step cascading rollback | M2 | NOT STARTED |
+| F-10 | Shipment create/cancel | M3 | NOT STARTED |
+| F-11 | Circuit breaker | M3 | NOT STARTED |
+| F-12 | Full 3-step saga | M3 | NOT STARTED |
+| F-13 | Live dashboard | M4 | NOT STARTED |
+| F-14 | Mock failure injection | M2/M3 | NOT STARTED |
+| F-15 | Tracing + metrics | M4 | NOT STARTED |
+| F-16 | Demo script | M4 | NOT STARTED |
+
+## Open questions / blockers
+- None. (Step 0 clarifications were skipped; recommended defaults adopted + recorded above.)
+
+## Commits so far
+- `chore: Step 1 lock features.mdc`
+- `chore: Step 1.5 lock ui-style.mdc`
+- `chore: Step 2 lock architecture.mdc and decisions.mdc`
+- `chore: Step 3 lock schema.mdc`

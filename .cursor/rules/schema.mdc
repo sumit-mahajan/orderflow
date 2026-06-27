@@ -1,0 +1,242 @@
+---
+description: Locked data contracts for OrderFlow — DB schema, DTOs, API + Kafka contracts.
+alwaysApply: false
+status: LOCKED — 2026-06-27
+---
+
+# OrderFlow — Data Contracts
+
+> One Postgres, four schemas (`order`, `inventory`, `payment`, `shipment`), per-service DB
+> user, zero cross-schema queries. Flyway per schema. All entities carry `created_at`,
+> `updated_at`; soft delete (`deleted_at`) where a row is user-meaningful. UUID PKs.
+> DDL below is the locked **contract**; exact Flyway SQL is written in Step 5.
+
+## Conventions
+- PKs: `uuid` (app-generated, v7-style/time-ordered preferred).
+- Timestamps: `timestamptz`, default `now()`. `updated_at` maintained by app/trigger.
+- Money: `numeric(12,2)`. Quantities: `integer` (CHECK ≥ 0).
+- Enums stored as `varchar` + CHECK (portable, Flyway-friendly) — not native PG enums.
+- Optimistic locking: `version integer` (`@Version`) where concurrent writes happen.
+- `correlation_id` = `order_id` (the business key threaded through all services + logs + traces).
+
+---
+
+## 1. `order` schema (orchestrator)
+
+### orders
+| col | type | notes |
+|---|---|---|
+| order_id | uuid PK | |
+| customer_id | uuid NOT NULL | |
+| total_amount | numeric(12,2) NOT NULL CHECK > 0 | |
+| status | varchar(32) NOT NULL | overall: PLACED / CONFIRMED / FAILED |
+| idempotency_key | varchar(128) NOT NULL | dedup; see Redis note |
+| simulate | jsonb NULL | demo failure-injection flags (F-14) |
+| created_at / updated_at | timestamptz | |
+| deleted_at | timestamptz NULL | soft delete |
+- Index: `uq_orders_idempotency (idempotency_key)` UNIQUE (DB backstop to Redis dedup).
+
+### order_items
+| col | type | notes |
+|---|---|---|
+| id | uuid PK | |
+| order_id | uuid NOT NULL FK→orders | |
+| sku | varchar(64) NOT NULL | |
+| qty | integer NOT NULL CHECK > 0 | |
+| unit_price | numeric(12,2) NOT NULL CHECK ≥ 0 | |
+- Index: `(order_id)`.
+
+### saga_instance  (system of record for saga state)
+| col | type | notes |
+|---|---|---|
+| saga_id | uuid PK | |
+| order_id | uuid NOT NULL UNIQUE FK→orders | |
+| current_state | varchar(32) NOT NULL | sealed-state name (see §5) |
+| version | integer NOT NULL DEFAULT 0 | optimistic lock (D-08) |
+| created_at / updated_at | timestamptz | |
+- Index: `(current_state)` (dashboard/sweeper queries).
+
+### saga_step  (append-only audit / timeline)
+| col | type | notes |
+|---|---|---|
+| id | uuid PK | |
+| saga_id | uuid NOT NULL FK→saga_instance | |
+| step | varchar(32) NOT NULL | INVENTORY / PAYMENT / SHIPMENT |
+| direction | varchar(16) NOT NULL | FORWARD / COMPENSATION |
+| status | varchar(16) NOT NULL | STARTED / SUCCESS / FAILED |
+| attempt | integer NOT NULL DEFAULT 1 | |
+| correlation_id | uuid NOT NULL | = order_id |
+| error | text NULL | failure reason |
+| created_at | timestamptz | |
+- Index: `(saga_id, created_at)`.
+
+### outbox  (transactional outbox, F-07)
+| col | type | notes |
+|---|---|---|
+| id | uuid PK | |
+| aggregate_type | varchar(32) NOT NULL | e.g. ORDER |
+| aggregate_id | uuid NOT NULL | order_id |
+| topic | varchar(128) NOT NULL | target Kafka topic |
+| msg_key | varchar(128) NOT NULL | = order_id (partition key) |
+| payload | jsonb NOT NULL | command envelope |
+| headers | jsonb NULL | traceparent etc. |
+| status | varchar(16) NOT NULL DEFAULT 'PENDING' | PENDING / SENT |
+| created_at | timestamptz | |
+| published_at | timestamptz NULL | |
+- Index: `(status, created_at)` — relay poll (`...WHERE status='PENDING' FOR UPDATE SKIP LOCKED`).
+
+> **Idempotency keys (F-02):** stored in **Redis** (`idem:{key}` → orderId, TTL 24h), not a
+> table. `orders.idempotency_key` UNIQUE is the durable backstop.
+
+---
+
+## 2. `inventory` schema
+
+### inventory_item
+| col | type | notes |
+|---|---|---|
+| sku | varchar(64) PK | |
+| available_qty | integer NOT NULL CHECK ≥ 0 | DB enforces no negative stock |
+| reserved_qty | integer NOT NULL DEFAULT 0 CHECK ≥ 0 | |
+| version | integer NOT NULL DEFAULT 0 | optimistic lock |
+| created_at / updated_at | timestamptz | |
+
+### inventory_reservation  (idempotency by natural key)
+| col | type | notes |
+|---|---|---|
+| id | uuid PK | |
+| order_id | uuid NOT NULL | |
+| sku | varchar(64) NOT NULL | |
+| qty | integer NOT NULL CHECK > 0 | |
+| status | varchar(16) NOT NULL | RESERVED / RELEASED |
+| created_at / updated_at | timestamptz | |
+- `uq_reservation (order_id, sku)` UNIQUE → reserve is idempotent (F-04); release flips
+  status, second release is a no-op (F-05).
+
+---
+
+## 3. `payment` schema
+
+### payment
+| col | type | notes |
+|---|---|---|
+| id | uuid PK | |
+| order_id | uuid NOT NULL UNIQUE | idempotency by order |
+| amount | numeric(12,2) NOT NULL CHECK > 0 | |
+| status | varchar(16) NOT NULL | CAPTURED / FAILED / REFUNDED |
+| failure_reason | varchar(128) NULL | injected-failure label (F-14) |
+| created_at / updated_at | timestamptz | |
+- Refund idempotent: if already REFUNDED, retried refund is a no-op (F-08).
+
+---
+
+## 4. `shipment` schema
+
+### shipment
+| col | type | notes |
+|---|---|---|
+| id | uuid PK | |
+| order_id | uuid NOT NULL UNIQUE | idempotency by order |
+| carrier_ref | varchar(64) NULL | mock label id |
+| status | varchar(16) NOT NULL | INITIATED / FAILED / CANCELLED |
+| failure_reason | varchar(128) NULL | injected fail/hang (F-14) |
+| created_at / updated_at | timestamptz | |
+- Cancel idempotent: if already CANCELLED, retried cancel is a no-op (F-10).
+
+> **Consumer idempotency (all participants):** natural keys above are the primary guard.
+> Optional `processed_message(message_id PK, consumer, processed_at)` inbox table per schema
+> as a belt-and-suspenders dedup — included as the documented mechanism for redelivery.
+
+---
+
+## 5. Saga states (sealed interface — F-03)
+`OrderPlaced` → `InventoryReserved` → `PaymentCaptured` → `ShipmentInitiated` →
+`OrderConfirmed`; failure branch: `Compensating` → `OrderFailed`.
+Stored as `saga_instance.current_state` (varchar). Steps: `INVENTORY`, `PAYMENT`, `SHIPMENT`.
+
+---
+
+## 6. REST API contract (order-service)
+Base: `/api/orders`. No auth (v1). All errors use the §8 envelope.
+
+| Method | Path | Auth | Body / Params | Success | Errors |
+|---|---|---|---|---|---|
+| POST | `/api/orders` | none | `Idempotency-Key` header + `PlaceOrderRequest` | `201 OrderResponse` | 400 invalid, 409 idem-conflict |
+| GET | `/api/orders/{id}` | none | — | `200 OrderDetailResponse` | 404 not found |
+| GET | `/api/orders` | none | `?page=0&size=20` | `200 Page<OrderSummary>` | 400 bad paging |
+| GET | `/api/orders/stream` | none | SSE | `200 text/event-stream` | — |
+| GET | `/actuator/health` | none | — | `200` | — |
+| GET | `/actuator/prometheus` | none | — | `200` | — |
+
+### DTOs (records)
+```
+PlaceOrderRequest {
+  customerId: UUID,
+  items: [ { sku: string, qty: int(>0) } ],   // non-empty
+  amount: decimal(>0),
+  simulate?: { paymentFail?: bool, shipmentMode?: "ok"|"fail"|"hang" }  // F-14, optional
+}
+OrderResponse        { orderId: UUID, status: string }                  // 201
+OrderSummary         { orderId, customerId, totalAmount, state, updatedAt }
+OrderDetailResponse  {
+  orderId, customerId, totalAmount, state,
+  items: [ { sku, qty, unitPrice } ],
+  steps: [ { step, direction, status, attempt, error?, at } ],
+  createdAt, updatedAt
+}
+```
+Validation at controller boundary (Jakarta Bean Validation): `@NotNull`, `@Positive`,
+`@NotEmpty items`. (≈ .NET DataAnnotations / FluentValidation at the boundary.)
+
+### SSE event (`/api/orders/stream`)
+```
+event: order-update
+data: { orderId, state, steps: [ {step, status} ], totalAmount, updatedAt }
+```
+Emitted on every saga transition; full snapshot per order (simple for the dashboard).
+
+---
+
+## 7. Kafka message contracts
+Topics: `orderflow.commands.{inventory|payment|shipment}` and
+`orderflow.events.{inventory|payment|shipment}`. Key = `order_id`. Headers carry `traceparent`.
+
+**Envelope (record):**
+```
+{ messageId: UUID, correlationId: UUID(orderId), sagaId: UUID,
+  type: string, occurredAt: instant, payload: { ... } }
+```
+
+| Direction | type | payload |
+|---|---|---|
+| cmd→inventory | `ReserveInventory` | `{ items:[{sku,qty}] }` |
+| cmd→inventory | `ReleaseInventory` | `{ items:[{sku,qty}] }` |
+| inventory→evt | `InventoryReserved` / `InventoryReservationFailed` | `{ reason? }` |
+| inventory→evt | `InventoryReleased` | `{}` |
+| cmd→payment | `CapturePayment` | `{ amount, simulate? }` |
+| cmd→payment | `RefundPayment` | `{ amount }` |
+| payment→evt | `PaymentCaptured` / `PaymentFailed` | `{ reason? }` |
+| payment→evt | `PaymentRefunded` | `{}` |
+| cmd→shipment | `CreateShipment` | `{ simulate? }` |
+| cmd→shipment | `CancelShipment` | `{}` |
+| shipment→evt | `ShipmentInitiated` / `ShipmentFailed` | `{ carrierRef? , reason? }` |
+| shipment→evt | `ShipmentCancelled` | `{}` |
+
+Compatibility: additive fields only in v1; consumers ignore unknown fields.
+
+---
+
+## 8. Error envelope (consistent across all services)
+```
+{
+  timestamp: ISO-8601,
+  status: int,          // HTTP status
+  error: string,        // short code, e.g. "VALIDATION_ERROR", "IDEMPOTENCY_CONFLICT", "NOT_FOUND"
+  message: string,      // human-readable
+  path: string,         // request path
+  correlationId: string // orderId / request id
+}
+```
+Produced by a global `@RestControllerAdvice`. Status mapping: 400 validation,
+404 not-found, 409 idempotency/state conflict, 500 unexpected (no stack trace to client).
+A **failed saga step is NOT an HTTP error** — it surfaces via saga state + SSE.
