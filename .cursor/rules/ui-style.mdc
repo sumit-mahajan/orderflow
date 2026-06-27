@@ -1,0 +1,78 @@
+---
+description: Locked visual language for OrderFlow dashboard. Reference throughout Step 5 (M4).
+alwaysApply: false
+status: LOCKED — 2026-06-27
+---
+
+# OrderFlow — UI Style
+
+> Scope: a **single-page live operations dashboard** for the saga engine. No landing
+> page, no auth (see deviations). Built in **M4** (F-13). This file locks the visual
+> language *before* any frontend code is written.
+
+## Deviations from workflow Step 1.5 defaults (to be recorded in decisions.mdc)
+- **No landing page / no auth.** Workflow defaults assume a public marketing landing +
+  "Sign in" + post-login `/dashboard` redirect. OrderFlow is a local ops/demo tool, so
+  the **dashboard lives at `/`** directly. All other Step 1.5 aesthetic defaults are kept.
+- **No LLM/marketing surfaces.** N/A for this project.
+
+## Aesthetic (kept from defaults)
+- Modern minimal, production-grade: clean whitespace, neutral palette, **one accent**,
+  sharp typography, subtle shadows/borders. No gradients, no decorative clutter.
+- Stack: **shadcn/ui pattern** — Tailwind + HSL CSS vars in `:root`/`.dark` + CVA.
+- **Inter** via Google Fonts in `index.css`. Tabular-nums for numeric columns (stock, amount).
+- Mono font (e.g. JetBrains Mono) for IDs/correlationIds; `break-all` on long IDs.
+
+## Color tokens
+- Neutral base (slate/zinc); **accent = indigo** (`221 83% 53%` light / brighter in dark).
+- **Semantic saga/step colors** (badges, with `dark:` variants):
+  - Pending / not-started → muted gray
+  - In-progress → amber (pulse/animated dot)
+  - Success (Reserved / Captured / Initiated / Confirmed) → green
+  - Failed → red
+  - Compensating → orange
+  - Compensated / Released / Refunded / Cancelled → violet (distinct from plain success)
+- Circuit-breaker state chip: CLOSED → green · HALF_OPEN → amber · OPEN → red.
+
+## Dark mode (kept from defaults)
+- Default **light**; sun/moon **ThemeToggle** in the app header.
+- Persist `orderflow-theme` in localStorage; Tailwind `darkMode: 'class'`.
+- Inline `<script>` in `index.html` **before React mounts** to prevent flash-of-wrong-theme.
+- Light tokens in `:root`, dark in `.dark` (class-based, not media query).
+
+## Layout
+- **App header** (sticky): logo + "OrderFlow" wordmark · short tagline ·
+  live connection indicator (SSE connected/reconnecting) · ThemeToggle.
+- **Stat strip**: `grid-cols-2 lg:grid-cols-4` — Total orders · Confirmed · Failed ·
+  In-flight (and/or current stock). Tabular numbers.
+- **Live order table** (primary): one row per order; columns = OrderId (mono, truncated) ·
+  Customer · Items · Amount · **Inventory** · **Payment** · **Shipment** (step badges) ·
+  Overall state · Updated-at. Rows update in place via SSE; newest on top with a brief
+  `fade-in`/highlight on change.
+- **Order detail** (drawer or `/orders/:id` route): saga timeline (per-step audit log with
+  timestamps + correlationId), compensation actions taken, raw event list.
+- **Demo controls** panel: "Place order" (sku/qty/amount) + failure-injection toggles
+  (force payment failure, shipment fail/hang) so all 4 demo scenarios run from the UI.
+
+## Responsive (kept from defaults)
+- Container `max-w-7xl … 2xl:max-w-[1440px]`; `3xl: '1920px'` breakpoint.
+- Mobile: stat grid `grid-cols-2`; order table collapses to stacked cards; 44px touch targets.
+- `break-all` on IDs/correlationIds.
+
+## UX patterns (kept from defaults)
+- **Skeleton loaders** (not spinners), shaped to the table/stat strip, on first load.
+- `fade-in` on page/cards and on row state changes.
+- SSE auto-reconnect with a visible "reconnecting…" indicator; no manual refresh.
+- **Toasts (sonner)** for order submission result and connection drops.
+- Order rows clickable → detail; per-order info on the detail page, not inline-edited in the list.
+- Empty state for the table (no orders yet) with a hint to place a demo order.
+
+## Branding (kept from defaults — assets generated at M4 start, before any UI code)
+- Concept-driven icon (NOT a plain letter): suggest interlocking flow/route + checkmark
+  motif evoking order flow + compensation. Generate via `GenerateImage`:
+  - `frontend/public/logo.png` (≥512×512)
+  - `frontend/public/favicon.svg`
+  - `frontend/public/og-image.png` (1200×630)
+- Reference logo in header + `apple-touch-icon`.
+- `index.html`: full meta/OG/Twitter tags (`title`, `description`, `theme-color`, `og:*`,
+  `twitter:*`, favicon links). Never ship Vite defaults.
