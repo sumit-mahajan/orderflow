@@ -6,9 +6,9 @@ alwaysApply: false
 # OrderFlow — Session State
 
 ## Status
-- **Last completed step:** Step 5 — **Milestone 2** (M2 implementation complete, all tests green, uncommitted)
+- **Last completed step:** Step 5 — **Milestone 3** (M3 implementation complete, all tests green, uncommitted)
 - **Current in-progress:** —
-- **Next immediate action:** User reviews M2 diff → approve → commit → build M3 (shipment-service + circuit breaker)
+- **Next immediate action:** User reviews M3 diff → approve → commit → build M4 (React dashboard + observability + demo)
 
 ## Locked artifacts
 - `features.mdc` — LOCKED (16 features, F-01..F-16, mapped to M1–M4)
@@ -28,12 +28,13 @@ alwaysApply: false
 - Deviations approved: no LLM layer, all-local Docker Compose, no auth/landing
 - Persistence style: idiomatic Spring Data (`OrderRepository`), no adapter boilerplate
 - Delivery: at-least-once + idempotency; virtual threads deferred (not wired in M1)
-- **Additive contract (M1 demo):** `Simulate.failAfterReserve` on `PlaceOrderRequest` / `CommandMessage` — triggers compensation after successful reserve (not in original schema.mdc; record at M1 gate or amend schema)
+- **Additive contract (M1 demo):** `Simulate.failAfterReserve` on `PlaceOrderRequest` / `CommandMessage`
+- **M3 CB config:** Resilience4j `@CircuitBreaker` on `ShipmentService.create`; slow-call threshold 2s; opens after 60% fail rate in 5-call window; `waitDurationInOpenState: 10s`
 
 ## Milestone progress (Step 5)
 - **M1** (order + inventory, 1-step saga + compensation): **DONE** (committed `4817f4c`)
-- **M2** (+ payment, 2-step saga, cascading rollback): **IMPLEMENTED — pending commit** (all tests green)
-- M3 (+ shipment, circuit breaker): NOT STARTED
+- **M2** (+ payment, 2-step saga, cascading rollback): **DONE** (committed `6b77ee4`)
+- **M3** (+ shipment, circuit breaker, full 3-step saga): **IMPLEMENTED — pending commit** (all tests green)
 - M4 (dashboard + observability + demo): NOT STARTED
 
 ## Feature status (Feature Completion Gate ledger)
@@ -42,36 +43,31 @@ alwaysApply: false
 |----|---------|-----------|--------|--------------|
 | F-01 | Place Order API | M1 | DONE | POST/GET/list + SSE. IT: 201 + saga row ✓ |
 | F-02 | Idempotent submission | M1 | DONE | Redis + DB unique. IT: same key twice → one order ✓ |
-| F-03 | Saga state machine | M1→M2 | DONE | Sealed interface; M2 adds PaymentCaptured + payment transitions. Unit tests: 8 green ✓ |
+| F-03 | Saga state machine | M1→M3 | DONE | M3: adds ShipmentInitiated, confirm only from ShipmentInitiated. Unit tests: 6 green ✓ |
 | F-04 | Reserve inventory | M1 | DONE | Inventory-service + IT. Stock decrements on reserve ✓ |
 | F-05 | Release inventory | M1 | DONE | Idempotent release + IT replay. Stock restored on release ✓ |
-| F-06 | Orchestrated compensation | M1→M2 | DONE | M1: failAfterReserve; M2: paymentFail → release → OrderFailed. IT: 3 scenarios ✓ |
+| F-06 | Orchestrated compensation | M1→M3 | DONE | M3: shipment fail → refund → release → OrderFailed. IT: 4 scenarios ✓ |
 | F-07 | Outbox publishing | M1 | DONE | Outbox + relay. Row PENDING → SENT; command reaches inventory ✓ |
 | F-08 | Capture/refund payment | M2 | DONE | payment-service: capture/refund idempotent. Unit + IT green (2 IT tests) ✓ |
 | F-09 | Two-step cascading rollback | M2 | DONE | IT: InventoryReserved → PaymentFailed → Compensating → InventoryReleased → OrderFailed ✓ |
-| F-10 | Shipment create/cancel | M3 | NOT STARTED | — |
-| F-11 | Circuit breaker | M3 | NOT STARTED | — |
-| F-12 | Full 3-step saga | M3 | NOT STARTED | — |
+| F-10 | Shipment create/cancel | M3 | DONE | Idempotent create/cancel, CB fallback. IT: 5 tests ✓ |
+| F-11 | Circuit breaker | M3 | DONE | Resilience4j @CircuitBreaker on carrier call; fail/hang mode trips breaker. IT: fallback verified ✓ |
+| F-12 | Full 3-step saga | M3 | DONE | IT: inventory→payment→shipment→Confirmed; shipment fail→refund→release→OrderFailed ✓ |
 | F-13 | Live dashboard | M4 | NOT STARTED | SSE endpoint only in M1 |
-| F-14 | Mock failure injection | M2/M3 | PARTIAL | M1: `failAfterReserve`; M2: `paymentFail` flag. Shipment mode deferred to M3 |
+| F-14 | Mock failure injection | M2/M3 | DONE | M1: failAfterReserve; M2: paymentFail; M3: shipmentMode ok/fail/hang ✓ |
 | F-15 | Tracing + metrics | M4 | NOT STARTED | Actuator health/prometheus exposed; no Zipkin/Grafana yet |
 | F-16 | Demo script | M4 | NOT STARTED | — |
 
-## M2 deliverables (uncommitted — pending user approval)
-- `payment-service/` — capture/refund, Kafka listener, Flyway V1, unit + IT tests (2 IT scenarios)
-- `order-service/` — SagaStateMachine extended (PaymentCaptured, onPaymentCaptured, confirm from PaymentCaptured, beginCompensation from PaymentCaptured), SagaOrchestrator handles PAYMENT_CAPTURED/PAYMENT_FAILED, PaymentEventListener, KafkaConfig adds payment topics
-- `pom.xml` — payment-service module added
-- `docker-compose.yml` — payment-service added on port 8082
-- All Dockerfiles — `app-exec.jar` classifier fix (Spring Boot repackage)
-- `docker-java.properties` — `api.version=1.44` added to payment-service (Docker 29+ compat)
-- `session-state.mdc` — updated M2 status
-
-## Also fixed during M2
-- **Spring Boot repackage / IT classpath bug** — parent POM `<classifier>exec</classifier>` keeps thin jar for Failsafe; Dockerfiles copy `app-exec.jar`. This was a pre-existing M1 issue discovered when running `mvn clean verify`.
+## M3 deliverables (uncommitted — pending user approval)
+- `shipment-service/` — domain (Shipment, ShipmentStatus), MockCarrierClient (ok/fail/hang), ShipmentService with @CircuitBreaker, ShipmentCommandListener, KafkaConfig, EventPublisher, Flyway V1, unit (6 tests) + IT (5 tests)
+- `order-service/` — SagaStateMachine (onShipmentInitiated, confirm from ShipmentInitiated, beginCompensation from PaymentCaptured, onPaymentRefunded), SagaOrchestrator (onPaymentCaptured→emitCreateShipment, onShipmentInitiated, onShipmentFailed, onPaymentRefunded, emitCreateShipment, emitRefundPayment), ShipmentEventListener, KafkaConfig adds shipment topics
+- `order-service/` tests — SagaStateMachineTest updated (6 tests, M3 transitions), OrderSagaIT updated (4 scenarios including full M3 cascade)
+- `pom.xml` — shipment-service module added
+- `docker-compose.yml` — shipment-service added on port 8083
+- `shipment-service/Dockerfile` — multi-stage build
 
 ## Open questions / blockers
-- **Schema drift (resolved):** `failAfterReserve` and `paymentFail` in `Simulate` are additive — no schema change needed; documented in session-state.
-- **M2 gate pending:** user must review diff and confirm before commit.
+- None. M3 gate pending user review + commit approval.
 
 ## Commits so far
 - `chore: Step 1 lock features.mdc`
@@ -80,7 +76,8 @@ alwaysApply: false
 - `chore: Step 3 lock schema.mdc`
 - `chore: Step 4 + 4.5 reviewer, local deployment contract, workflow`
 - `feat: M1 order+inventory 1-step saga with compensation` (4817f4c)
+- `feat: M2 payment-service 2-step saga with cascading rollback` (6b77ee4)
 
 ## Uncommitted work
-- All M2 implementation files (see M2 deliverables above)
+- All M3 implementation files (see M3 deliverables above)
 - Updated `session-state.mdc` (this file)

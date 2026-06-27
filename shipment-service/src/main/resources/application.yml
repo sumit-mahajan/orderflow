@@ -1,0 +1,56 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: shipment-service
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/orderflow}
+    username: ${SPRING_DATASOURCE_USERNAME:shipment_user}
+    password: ${SPRING_DATASOURCE_PASSWORD:shipment_pw}
+  jpa:
+    hibernate:
+      ddl-auto: validate   # Flyway owns the schema; Hibernate validates entities against it
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:29092}
+    consumer:
+      group-id: shipment-service
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      carrier:
+        # Open when ≥60% of calls fail within a 5-call sliding window (need ≥3 calls first).
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 5
+        minimumNumberOfCalls: 3
+        failureRateThreshold: 60
+        # Slow calls (>2s) also count as failures — catches "hang" mode.
+        slowCallDurationThreshold: 2s
+        slowCallRateThreshold: 60
+        # Stay OPEN for 10s before transitioning to HALF_OPEN.
+        waitDurationInOpenState: 10s
+        # Allow 2 test calls in HALF_OPEN; if they succeed the breaker closes.
+        permittedNumberOfCallsInHalfOpenState: 2
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,circuitbreakers
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    circuitbreakers:
+      enabled: true

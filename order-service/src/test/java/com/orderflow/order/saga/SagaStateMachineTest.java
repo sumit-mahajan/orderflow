@@ -9,25 +9,30 @@ import com.orderflow.order.saga.SagaState.OrderConfirmed;
 import com.orderflow.order.saga.SagaState.OrderFailed;
 import com.orderflow.order.saga.SagaState.OrderPlaced;
 import com.orderflow.order.saga.SagaState.PaymentCaptured;
+import com.orderflow.order.saga.SagaState.ShipmentInitiated;
 import org.junit.jupiter.api.Test;
 
 class SagaStateMachineTest {
 
   @Test
-  void happyPath_placed_reserved_paymentCaptured_confirmed() {
+  void happyPath_placed_reserved_paymentCaptured_shipmentInitiated_confirmed() {
     SagaState reserved = SagaStateMachine.onInventoryReserved(new OrderPlaced());
     assertThat(reserved).isInstanceOf(InventoryReserved.class);
 
     SagaState paymentCaptured = SagaStateMachine.onPaymentCaptured(reserved);
     assertThat(paymentCaptured).isInstanceOf(PaymentCaptured.class);
 
-    SagaState confirmed = SagaStateMachine.confirm(paymentCaptured);
+    SagaState shipmentInitiated = SagaStateMachine.onShipmentInitiated(paymentCaptured);
+    assertThat(shipmentInitiated).isInstanceOf(ShipmentInitiated.class);
+
+    SagaState confirmed = SagaStateMachine.confirm(shipmentInitiated);
     assertThat(confirmed).isInstanceOf(OrderConfirmed.class);
     assertThat(confirmed.isTerminal()).isTrue();
   }
 
   @Test
-  void compensationPath_reservedThenPaymentFailed_releasesInventory_thenFails() {
+  void compensationPath_paymentFailed_releasesInventory_thenFails() {
+    // M2: payment fails → beginCompensation from InventoryReserved → release → OrderFailed
     SagaState reserved = SagaStateMachine.onInventoryReserved(new OrderPlaced());
     SagaState compensating = SagaStateMachine.beginCompensation(reserved);
     assertThat(compensating).isInstanceOf(Compensating.class);
@@ -38,9 +43,19 @@ class SagaStateMachineTest {
   }
 
   @Test
-  void compensationPath_paymentCapturedThenFailed_beginCompensation() {
-    SagaState compensating = SagaStateMachine.beginCompensation(new PaymentCaptured());
+  void compensationPath_shipmentFailed_refundPayment_releaseInventory_thenFails() {
+    // M3: shipment fails → beginCompensation from PaymentCaptured → refund → release → OrderFailed
+    SagaState paymentCaptured = SagaStateMachine.onPaymentCaptured(new InventoryReserved());
+    SagaState compensating = SagaStateMachine.beginCompensation(paymentCaptured);
     assertThat(compensating).isInstanceOf(Compensating.class);
+
+    // Payment refunded — still compensating (inventory release follows)
+    SagaState stillCompensating = SagaStateMachine.onPaymentRefunded(compensating);
+    assertThat(stillCompensating).isInstanceOf(Compensating.class);
+
+    SagaState failed = SagaStateMachine.onInventoryReleased(stillCompensating);
+    assertThat(failed).isInstanceOf(OrderFailed.class);
+    assertThat(failed.isTerminal()).isTrue();
   }
 
   @Test
@@ -53,7 +68,9 @@ class SagaStateMachineTest {
   void illegalTransitions_areRejected() {
     assertThatThrownBy(() -> SagaStateMachine.onInventoryReserved(new OrderConfirmed()))
         .isInstanceOf(IllegalSagaTransition.class);
-    // confirm no longer valid from InventoryReserved (must go through PaymentCaptured)
+    // M3: confirm only valid from ShipmentInitiated
+    assertThatThrownBy(() -> SagaStateMachine.confirm(new PaymentCaptured()))
+        .isInstanceOf(IllegalSagaTransition.class);
     assertThatThrownBy(() -> SagaStateMachine.confirm(new InventoryReserved()))
         .isInstanceOf(IllegalSagaTransition.class);
     assertThatThrownBy(() -> SagaStateMachine.confirm(new OrderPlaced()))
@@ -62,7 +79,7 @@ class SagaStateMachineTest {
         .isInstanceOf(IllegalSagaTransition.class);
     assertThatThrownBy(() -> SagaStateMachine.beginCompensation(new OrderPlaced()))
         .isInstanceOf(IllegalSagaTransition.class);
-    assertThatThrownBy(() -> SagaStateMachine.onPaymentCaptured(new OrderPlaced()))
+    assertThatThrownBy(() -> SagaStateMachine.onShipmentInitiated(new InventoryReserved()))
         .isInstanceOf(IllegalSagaTransition.class);
   }
 
@@ -70,6 +87,9 @@ class SagaStateMachineTest {
   void stateName_roundTripsThroughParser() {
     SagaState parsed = SagaStates.parse(new Compensating().stateName());
     assertThat(parsed).isInstanceOf(Compensating.class);
+
+    SagaState shipment = SagaStates.parse(new ShipmentInitiated().stateName());
+    assertThat(shipment).isInstanceOf(ShipmentInitiated.class);
 
     SagaState payment = SagaStates.parse(new PaymentCaptured().stateName());
     assertThat(payment).isInstanceOf(PaymentCaptured.class);

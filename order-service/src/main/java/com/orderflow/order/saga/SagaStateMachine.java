@@ -6,6 +6,7 @@ import com.orderflow.order.saga.SagaState.OrderConfirmed;
 import com.orderflow.order.saga.SagaState.OrderFailed;
 import com.orderflow.order.saga.SagaState.OrderPlaced;
 import com.orderflow.order.saga.SagaState.PaymentCaptured;
+import com.orderflow.order.saga.SagaState.ShipmentInitiated;
 
 /**
  * Legal saga transitions, expressed as pattern-matched {@code switch} over the sealed {@link
@@ -14,8 +15,10 @@ import com.orderflow.order.saga.SagaState.PaymentCaptured;
  *
  * <ul>
  *   <li>M1: OrderPlaced → InventoryReserved → Compensating → OrderFailed (compensation path)
- *   <li>M2: adds PaymentCaptured state; happy path now confirms from PaymentCaptured
- *   <li>M3: will add ShipmentInitiated and confirm from there
+ *   <li>M2: adds PaymentCaptured; compensation from InventoryReserved (payment fail) → release →
+ *       OrderFailed
+ *   <li>M3: adds ShipmentInitiated; confirm only from ShipmentInitiated; compensation from
+ *       PaymentCaptured (shipment fail) → refund payment → release inventory → OrderFailed
  * </ul>
  */
 public final class SagaStateMachine {
@@ -44,20 +47,31 @@ public final class SagaStateMachine {
     };
   }
 
+  /** M3: payment captured → shipment initiated. */
+  public static SagaState onShipmentInitiated(SagaState current) {
+    return switch (current) {
+      case PaymentCaptured ignored -> new ShipmentInitiated();
+      default -> throw new IllegalSagaTransition("SHIPMENT_INITIATED", current);
+    };
+  }
+
   /**
-   * Terminal confirmation. M2: from PaymentCaptured (no shipment yet). M3: will extend to accept
-   * ShipmentInitiated.
+   * Terminal confirmation. M3: only from ShipmentInitiated (full 3-step happy path).
    */
   public static SagaState confirm(SagaState current) {
     return switch (current) {
-      case PaymentCaptured ignored -> new OrderConfirmed();
+      case ShipmentInitiated ignored -> new OrderConfirmed();
       default -> throw new IllegalSagaTransition("CONFIRM", current);
     };
   }
 
   /**
-   * Start compensation. Valid from any state where a forward step has succeeded and needs undoing:
-   * InventoryReserved (payment failed) or PaymentCaptured (shipment failed — M3).
+   * Start compensation. Valid from any forward state that has succeeded and needs undoing:
+   *
+   * <ul>
+   *   <li>InventoryReserved — payment failed (M2): issue release inventory.
+   *   <li>PaymentCaptured — shipment failed before initiation (M3): issue refund payment.
+   * </ul>
    */
   public static SagaState beginCompensation(SagaState current) {
     return switch (current) {
@@ -67,18 +81,18 @@ public final class SagaStateMachine {
     };
   }
 
-  public static SagaState onInventoryReleased(SagaState current) {
-    return switch (current) {
-      case Compensating ignored -> new OrderFailed();
-      default -> throw new IllegalSagaTransition("INVENTORY_RELEASED", current);
-    };
-  }
-
-  /** M3 hook: payment refunded during compensation — still Compensating (more steps to undo). */
+  /** Payment refunded during compensation — still Compensating (inventory release follows). */
   public static SagaState onPaymentRefunded(SagaState current) {
     return switch (current) {
       case Compensating ignored -> new Compensating();
       default -> throw new IllegalSagaTransition("PAYMENT_REFUNDED", current);
+    };
+  }
+
+  public static SagaState onInventoryReleased(SagaState current) {
+    return switch (current) {
+      case Compensating ignored -> new OrderFailed();
+      default -> throw new IllegalSagaTransition("INVENTORY_RELEASED", current);
     };
   }
 }

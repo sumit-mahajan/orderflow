@@ -8,6 +8,7 @@ COPY inventory-service ./inventory-service
 # Parent POM lists all modules; Maven fails if a declared module dir is missing.
 COPY order-service ./order-service
 COPY payment-service ./payment-service
+COPY shipment-service ./shipment-service
 RUN mvn -q -pl inventory-service -am -DskipTests clean package
 
 FROM eclipse-temurin:21-jre

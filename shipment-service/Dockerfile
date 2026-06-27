@@ -8,10 +8,10 @@ COPY inventory-service ./inventory-service
 COPY order-service ./order-service
 COPY payment-service ./payment-service
 COPY shipment-service ./shipment-service
-RUN mvn -q -pl payment-service -am -DskipTests clean package
+RUN mvn -q -pl shipment-service -am -DskipTests clean package
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-COPY --from=build /workspace/payment-service/target/app-exec.jar app.jar
-EXPOSE 8082
+COPY --from=build /workspace/shipment-service/target/app-exec.jar app.jar
+EXPOSE 8083
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]

@@ -81,7 +81,7 @@ class OrderSagaIT {
   }
 
   @Test
-  void happyPath_inventoryReserved_paymentCaptured_thenConfirmed() {
+  void happyPath_fullThreeStepSaga_thenConfirmed() {
     PlaceOrderResult result = placeOrderService.place("key-" + UUID.randomUUID(), request(null));
     UUID orderId = result.orderId();
 
@@ -95,6 +95,11 @@ class OrderSagaIT {
     assertThat(outbox.findAll()).anyMatch(o -> o.getPayload().contains("CAPTURE_PAYMENT"));
 
     orchestrator.handle(event(orderId, saga.getSagaId(), EventType.PAYMENT_CAPTURED));
+    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
+        .isEqualTo("PaymentCaptured");
+    assertThat(outbox.findAll()).anyMatch(o -> o.getPayload().contains("CREATE_SHIPMENT"));
+
+    orchestrator.handle(eventWithCarrier(orderId, saga.getSagaId(), EventType.SHIPMENT_INITIATED, "LABEL-TEST01"));
     assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
         .isEqualTo("OrderConfirmed");
     assertThat(orders.findById(orderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.CONFIRMED);
@@ -142,5 +147,44 @@ class OrderSagaIT {
     assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
         .isEqualTo("OrderFailed");
     assertThat(orders.findById(orderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.FAILED);
+  }
+
+  @Test
+  void m3_shipmentFail_compensates_refundPayment_releaseInventory_thenFails() {
+    // M3: inventory reserved → payment captured → shipment fails →
+    //     refund payment → release inventory → OrderFailed (full 3-step reverse cascade, F-12)
+    PlaceOrderResult result =
+        placeOrderService.place(
+            "key-" + UUID.randomUUID(), request(new SimulateDto(null, "fail", null)));
+    UUID orderId = result.orderId();
+    SagaInstance saga = sagas.findByOrderId(orderId).orElseThrow();
+
+    orchestrator.handle(event(orderId, saga.getSagaId(), EventType.INVENTORY_RESERVED));
+    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
+        .isEqualTo("InventoryReserved");
+
+    orchestrator.handle(event(orderId, saga.getSagaId(), EventType.PAYMENT_CAPTURED));
+    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
+        .isEqualTo("PaymentCaptured");
+    assertThat(outbox.findAll()).anyMatch(o -> o.getPayload().contains("CREATE_SHIPMENT"));
+
+    orchestrator.handle(event(orderId, saga.getSagaId(), EventType.SHIPMENT_FAILED));
+    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
+        .isEqualTo("Compensating");
+    assertThat(outbox.findAll()).anyMatch(o -> o.getPayload().contains("REFUND_PAYMENT"));
+
+    orchestrator.handle(event(orderId, saga.getSagaId(), EventType.PAYMENT_REFUNDED));
+    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
+        .isEqualTo("Compensating");
+    assertThat(outbox.findAll()).anyMatch(o -> o.getPayload().contains("RELEASE_INVENTORY"));
+
+    orchestrator.handle(event(orderId, saga.getSagaId(), EventType.INVENTORY_RELEASED));
+    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
+        .isEqualTo("OrderFailed");
+    assertThat(orders.findById(orderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.FAILED);
+  }
+
+  private static EventMessage eventWithCarrier(UUID orderId, UUID sagaId, EventType type, String carrierRef) {
+    return new EventMessage(UUID.randomUUID(), orderId, sagaId, type, null, carrierRef, Instant.now());
   }
 }

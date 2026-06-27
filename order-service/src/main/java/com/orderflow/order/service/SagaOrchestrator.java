@@ -35,11 +35,13 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * {@link SagaStateMachine}, and — on failure — drives compensations in reverse order.
  *
  * <ul>
- *   <li>M1/M2 inventory: InventoryReserved → send CapturePayment (or failAfterReserve →
+ *   <li>M1/M2/M3 inventory: InventoryReserved → send CapturePayment (or failAfterReserve →
  *       compensation). InventoryReservationFailed → OrderFailed. InventoryReleased (compensating)
  *       → OrderFailed.
- *   <li>M2 payment: PaymentCaptured → OrderConfirmed. PaymentFailed → begin compensation, emit
- *       ReleaseInventory.
+ *   <li>M2 payment: PaymentFailed → begin compensation, emit ReleaseInventory. PaymentRefunded
+ *       (M3 compensation) → emit ReleaseInventory, still Compensating.
+ *   <li>M3 shipment: PaymentCaptured → emit CreateShipment. ShipmentInitiated → confirm.
+ *       ShipmentFailed → begin compensation, emit RefundPayment (→ release inventory → OrderFailed).
  * </ul>
  *
  * <p>Redelivered/late events are safe: the state machine rejects illegal transitions and we treat
@@ -88,6 +90,9 @@ public class SagaOrchestrator {
         case INVENTORY_RELEASED -> onInventoryReleased(saga, current, orderId);
         case PAYMENT_CAPTURED -> onPaymentCaptured(saga, current, orderId);
         case PAYMENT_FAILED -> onPaymentFailed(saga, current, orderId, event);
+        case PAYMENT_REFUNDED -> onPaymentRefunded(saga, current, orderId);
+        case SHIPMENT_INITIATED -> onShipmentInitiated(saga, current, orderId, event);
+        case SHIPMENT_FAILED -> onShipmentFailed(saga, current, orderId, event);
         default -> log.warn("Unhandled event {} for order {}", event.type(), orderId);
       }
     } catch (IllegalSagaTransition e) {
@@ -127,13 +132,56 @@ public class SagaOrchestrator {
 
   private void onPaymentCaptured(SagaInstance saga, SagaState current, UUID orderId) {
     SagaState paymentCaptured = SagaStateMachine.onPaymentCaptured(current);
-    SagaState confirmed = SagaStateMachine.confirm(paymentCaptured);
-    saga.setCurrentState(confirmed.stateName());
+    saga.setCurrentState(paymentCaptured.stateName());
     recordStep(saga, StepEnums.StepName.PAYMENT, StepEnums.Direction.FORWARD,
+        StepEnums.Status.SUCCESS, orderId, null);
+    OrderEntity order = orders.findById(orderId).orElseThrow();
+    Simulate simulate = readSimulate(order);
+    emitCreateShipment(saga, order, simulate);
+    recordStep(saga, StepEnums.StepName.SHIPMENT, StepEnums.Direction.FORWARD,
+        StepEnums.Status.STARTED, orderId, null);
+    sagas.save(saga);
+    log.info("Order {} payment captured — initiating shipment", orderId);
+  }
+
+  private void onShipmentInitiated(
+      SagaInstance saga, SagaState current, UUID orderId, EventMessage event) {
+    SagaState shipmentInitiated = SagaStateMachine.onShipmentInitiated(current);
+    SagaState confirmed = SagaStateMachine.confirm(shipmentInitiated);
+    saga.setCurrentState(confirmed.stateName());
+    recordStep(saga, StepEnums.StepName.SHIPMENT, StepEnums.Direction.FORWARD,
         StepEnums.Status.SUCCESS, orderId, null);
     orders.findById(orderId).ifPresent(OrderEntity::markConfirmed);
     sagas.save(saga);
-    log.info("Order {} payment captured → confirmed", orderId);
+    log.info("Order {} shipment initiated (carrierRef={}) → confirmed", orderId, event.carrierRef());
+  }
+
+  private void onShipmentFailed(
+      SagaInstance saga, SagaState current, UUID orderId, EventMessage event) {
+    SagaState compensating = SagaStateMachine.beginCompensation(current);
+    saga.setCurrentState(compensating.stateName());
+    recordStep(saga, StepEnums.StepName.SHIPMENT, StepEnums.Direction.FORWARD,
+        StepEnums.Status.FAILED, orderId, event.reason());
+    OrderEntity order = orders.findById(orderId).orElseThrow();
+    Simulate simulate = readSimulate(order);
+    emitRefundPayment(saga, order, simulate);
+    recordStep(saga, StepEnums.StepName.PAYMENT, StepEnums.Direction.COMPENSATION,
+        StepEnums.Status.STARTED, orderId, "shipment failed, refunding payment");
+    sagas.save(saga);
+    log.info("Order {} shipment failed → compensating (refund payment)", orderId);
+  }
+
+  private void onPaymentRefunded(SagaInstance saga, SagaState current, UUID orderId) {
+    SagaStateMachine.onPaymentRefunded(current); // validates Compensating → Compensating
+    recordStep(saga, StepEnums.StepName.PAYMENT, StepEnums.Direction.COMPENSATION,
+        StepEnums.Status.SUCCESS, orderId, null);
+    OrderEntity order = orders.findById(orderId).orElseThrow();
+    Simulate simulate = readSimulate(order);
+    emitReleaseInventory(saga, order, simulate);
+    recordStep(saga, StepEnums.StepName.INVENTORY, StepEnums.Direction.COMPENSATION,
+        StepEnums.Status.STARTED, orderId, "payment refunded, releasing inventory");
+    sagas.save(saga);
+    log.info("Order {} payment refunded → releasing inventory", orderId);
   }
 
   private void onPaymentFailed(
@@ -170,6 +218,34 @@ public class SagaOrchestrator {
         StepEnums.Status.SUCCESS, orderId, null);
     orders.findById(orderId).ifPresent(OrderEntity::markFailed);
     log.info("Order {} compensation complete (inventory released) — order failed", orderId);
+  }
+
+  private void emitCreateShipment(SagaInstance saga, OrderEntity order, Simulate simulate) {
+    CommandMessage create =
+        new CommandMessage(
+            UUID.randomUUID(),
+            order.getOrderId(),
+            saga.getSagaId(),
+            CommandType.CREATE_SHIPMENT,
+            null,
+            null,
+            simulate,
+            Instant.now());
+    outboxWriter.enqueueCommand(Topics.COMMANDS_SHIPMENT, create);
+  }
+
+  private void emitRefundPayment(SagaInstance saga, OrderEntity order, Simulate simulate) {
+    CommandMessage refund =
+        new CommandMessage(
+            UUID.randomUUID(),
+            order.getOrderId(),
+            saga.getSagaId(),
+            CommandType.REFUND_PAYMENT,
+            null,
+            order.getTotalAmount(),
+            simulate,
+            Instant.now());
+    outboxWriter.enqueueCommand(Topics.COMMANDS_PAYMENT, refund);
   }
 
   private void emitCapturePayment(SagaInstance saga, OrderEntity order, Simulate simulate) {
