@@ -33,8 +33,9 @@ import org.testcontainers.utility.DockerImageName;
 
 /**
  * End-to-end saga inside order-service against real Postgres + Kafka + Redis. We drive the
- * participant's result events directly (no inventory-service running) to prove orchestration:
- * happy path → OrderConfirmed, and injected failure → compensation → OrderFailed.
+ * participant's result events directly (no inventory or payment service running) to prove
+ * orchestration: happy path (inventory + payment → OrderConfirmed), failAfterReserve (M1
+ * compensation before payment), and payment failure (M2 compensation → release inventory).
  */
 @SpringBootTest
 @Testcontainers
@@ -80,17 +81,20 @@ class OrderSagaIT {
   }
 
   @Test
-  void happyPath_reservedThenConfirmed() {
+  void happyPath_inventoryReserved_paymentCaptured_thenConfirmed() {
     PlaceOrderResult result = placeOrderService.place("key-" + UUID.randomUUID(), request(null));
     UUID orderId = result.orderId();
 
     SagaInstance saga = sagas.findByOrderId(orderId).orElseThrow();
     assertThat(saga.getCurrentState()).isEqualTo("OrderPlaced");
-    assertThat(outbox.findAll())
-        .anyMatch(o -> o.getTopic().equals(Topics.COMMANDS_INVENTORY));
+    assertThat(outbox.findAll()).anyMatch(o -> o.getTopic().equals(Topics.COMMANDS_INVENTORY));
 
     orchestrator.handle(event(orderId, saga.getSagaId(), EventType.INVENTORY_RESERVED));
+    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
+        .isEqualTo("InventoryReserved");
+    assertThat(outbox.findAll()).anyMatch(o -> o.getPayload().contains("CAPTURE_PAYMENT"));
 
+    orchestrator.handle(event(orderId, saga.getSagaId(), EventType.PAYMENT_CAPTURED));
     assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
         .isEqualTo("OrderConfirmed");
     assertThat(orders.findById(orderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.CONFIRMED);
@@ -112,7 +116,31 @@ class OrderSagaIT {
 
     orchestrator.handle(event(orderId, saga.getSagaId(), EventType.INVENTORY_RELEASED));
 
-    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState()).isEqualTo("OrderFailed");
+    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
+        .isEqualTo("OrderFailed");
+    assertThat(orders.findById(orderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.FAILED);
+  }
+
+  @Test
+  void m2_paymentFail_compensates_inventoryReleased_thenFails() {
+    PlaceOrderResult result =
+        placeOrderService.place(
+            "key-" + UUID.randomUUID(), request(new SimulateDto(true, null, null)));
+    UUID orderId = result.orderId();
+    SagaInstance saga = sagas.findByOrderId(orderId).orElseThrow();
+
+    orchestrator.handle(event(orderId, saga.getSagaId(), EventType.INVENTORY_RESERVED));
+    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
+        .isEqualTo("InventoryReserved");
+
+    orchestrator.handle(event(orderId, saga.getSagaId(), EventType.PAYMENT_FAILED));
+    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
+        .isEqualTo("Compensating");
+    assertThat(outbox.findAll()).anyMatch(o -> o.getPayload().contains("RELEASE_INVENTORY"));
+
+    orchestrator.handle(event(orderId, saga.getSagaId(), EventType.INVENTORY_RELEASED));
+    assertThat(sagas.findByOrderId(orderId).orElseThrow().getCurrentState())
+        .isEqualTo("OrderFailed");
     assertThat(orders.findById(orderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.FAILED);
   }
 }

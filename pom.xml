@@ -17,6 +17,7 @@
         <module>common</module>
         <module>inventory-service</module>
         <module>order-service</module>
+        <module>payment-service</module>
     </modules>
 
     <properties>
@@ -69,6 +70,12 @@
                             <goals>
                                 <goal>repackage</goal>
                             </goals>
+                            <configuration>
+                                <!-- Use classifier so the thin jar (app.jar) remains on the
+                                     Failsafe classpath. Fat jar becomes app-exec.jar.
+                                     Dockerfiles COPY the exec-classified jar. -->
+                                <classifier>exec</classifier>
+                            </configuration>
                         </execution>
                     </executions>
                 </plugin>

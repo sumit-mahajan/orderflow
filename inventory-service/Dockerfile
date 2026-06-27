@@ -7,10 +7,11 @@ COPY common ./common
 COPY inventory-service ./inventory-service
 # Parent POM lists all modules; Maven fails if a declared module dir is missing.
 COPY order-service ./order-service
+COPY payment-service ./payment-service
 RUN mvn -q -pl inventory-service -am -DskipTests clean package
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-COPY --from=build /workspace/inventory-service/target/app.jar app.jar
+COPY --from=build /workspace/inventory-service/target/app-exec.jar app.jar
 EXPOSE 8081
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]

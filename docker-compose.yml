@@ -1,4 +1,4 @@
-# OrderFlow local stack. M1 brings up infra + order-service + inventory-service.
+# OrderFlow local stack. M2 brings up infra + order-service + inventory-service + payment-service.
 # Run everything:        docker compose up --build
 # Run infra only:        docker compose up postgres kafka redis
 #   (then run services on host with: mvn -pl order-service spring-boot:run, etc.)
@@ -95,6 +95,22 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     ports:
       - "8081:8081"
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: payment-service/Dockerfile
+    container_name: orderflow-payment
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-orderflow}
+      SPRING_DATASOURCE_USERNAME: ${PAYMENT_DB_USER:-payment_user}
+      SPRING_DATASOURCE_PASSWORD: ${PAYMENT_DB_PASSWORD:-payment_pw}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ports:
+      - "8082:8082"
 
 volumes:
   pgdata:

@@ -34,13 +34,12 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * The saga orchestrator (F-06). Reacts to participant result events, advances the saga via the
  * {@link SagaStateMachine}, and — on failure — drives compensations in reverse order.
  *
- * <p>M1 wires only the inventory step:
- *
  * <ul>
- *   <li>InventoryReserved + no injected failure → OrderConfirmed.
- *   <li>InventoryReserved + {@code failAfterReserve} → begin Compensating, emit ReleaseInventory.
- *   <li>InventoryReservationFailed → OrderFailed (nothing to compensate).
- *   <li>InventoryReleased (during Compensating) → OrderFailed.
+ *   <li>M1/M2 inventory: InventoryReserved → send CapturePayment (or failAfterReserve →
+ *       compensation). InventoryReservationFailed → OrderFailed. InventoryReleased (compensating)
+ *       → OrderFailed.
+ *   <li>M2 payment: PaymentCaptured → OrderConfirmed. PaymentFailed → begin compensation, emit
+ *       ReleaseInventory.
  * </ul>
  *
  * <p>Redelivered/late events are safe: the state machine rejects illegal transitions and we treat
@@ -87,6 +86,8 @@ public class SagaOrchestrator {
         case INVENTORY_RESERVED -> onInventoryReserved(saga, current, orderId);
         case INVENTORY_RESERVATION_FAILED -> onReservationFailed(saga, current, orderId, event);
         case INVENTORY_RELEASED -> onInventoryReleased(saga, current, orderId);
+        case PAYMENT_CAPTURED -> onPaymentCaptured(saga, current, orderId);
+        case PAYMENT_FAILED -> onPaymentFailed(saga, current, orderId, event);
         default -> log.warn("Unhandled event {} for order {}", event.type(), orderId);
       }
     } catch (IllegalSagaTransition e) {
@@ -98,7 +99,7 @@ public class SagaOrchestrator {
   }
 
   private void onInventoryReserved(SagaInstance saga, SagaState current, UUID orderId) {
-    SagaStateMachine.onInventoryReserved(current); // validates we were in OrderPlaced
+    SagaState inventoryReserved = SagaStateMachine.onInventoryReserved(current);
     recordStep(saga, StepEnums.StepName.INVENTORY, StepEnums.Direction.FORWARD,
         StepEnums.Status.SUCCESS, orderId, null);
 
@@ -106,20 +107,48 @@ public class SagaOrchestrator {
     Simulate simulate = readSimulate(order);
 
     if (simulate != null && Boolean.TRUE.equals(simulate.failAfterReserve())) {
-      // Injected failure: begin compensation by releasing the stock we just reserved.
-      SagaState compensating = SagaStateMachine.beginCompensation(new SagaState.InventoryReserved());
+      // M1 demo: injected failure before payment is attempted.
+      SagaState compensating = SagaStateMachine.beginCompensation(inventoryReserved);
       saga.setCurrentState(compensating.stateName());
       emitReleaseInventory(saga, order, simulate);
       recordStep(saga, StepEnums.StepName.INVENTORY, StepEnums.Direction.COMPENSATION,
           StepEnums.Status.STARTED, orderId, "failAfterReserve injected");
       log.info("Order {} reserved then forced to fail — compensating (release inventory)", orderId);
     } else {
-      SagaState confirmed = SagaStateMachine.confirm(new SagaState.InventoryReserved());
-      saga.setCurrentState(confirmed.stateName());
-      order.markConfirmed();
-      log.info("Order {} confirmed", orderId);
+      // M2: advance to InventoryReserved and send CapturePayment.
+      saga.setCurrentState(inventoryReserved.stateName());
+      emitCapturePayment(saga, order, simulate);
+      recordStep(saga, StepEnums.StepName.PAYMENT, StepEnums.Direction.FORWARD,
+          StepEnums.Status.STARTED, orderId, null);
+      log.info("Order {} inventory reserved — capturing payment", orderId);
     }
     sagas.save(saga);
+  }
+
+  private void onPaymentCaptured(SagaInstance saga, SagaState current, UUID orderId) {
+    SagaState paymentCaptured = SagaStateMachine.onPaymentCaptured(current);
+    SagaState confirmed = SagaStateMachine.confirm(paymentCaptured);
+    saga.setCurrentState(confirmed.stateName());
+    recordStep(saga, StepEnums.StepName.PAYMENT, StepEnums.Direction.FORWARD,
+        StepEnums.Status.SUCCESS, orderId, null);
+    orders.findById(orderId).ifPresent(OrderEntity::markConfirmed);
+    sagas.save(saga);
+    log.info("Order {} payment captured → confirmed", orderId);
+  }
+
+  private void onPaymentFailed(
+      SagaInstance saga, SagaState current, UUID orderId, EventMessage event) {
+    SagaState compensating = SagaStateMachine.beginCompensation(current);
+    saga.setCurrentState(compensating.stateName());
+    recordStep(saga, StepEnums.StepName.PAYMENT, StepEnums.Direction.FORWARD,
+        StepEnums.Status.FAILED, orderId, event.reason());
+    OrderEntity order = orders.findById(orderId).orElseThrow();
+    Simulate simulate = readSimulate(order);
+    emitReleaseInventory(saga, order, simulate);
+    recordStep(saga, StepEnums.StepName.INVENTORY, StepEnums.Direction.COMPENSATION,
+        StepEnums.Status.STARTED, orderId, "payment failed, releasing inventory");
+    sagas.save(saga);
+    log.info("Order {} payment failed → compensating (release inventory)", orderId);
   }
 
   private void onReservationFailed(
@@ -141,6 +170,20 @@ public class SagaOrchestrator {
         StepEnums.Status.SUCCESS, orderId, null);
     orders.findById(orderId).ifPresent(OrderEntity::markFailed);
     log.info("Order {} compensation complete (inventory released) — order failed", orderId);
+  }
+
+  private void emitCapturePayment(SagaInstance saga, OrderEntity order, Simulate simulate) {
+    CommandMessage capture =
+        new CommandMessage(
+            UUID.randomUUID(),
+            order.getOrderId(),
+            saga.getSagaId(),
+            CommandType.CAPTURE_PAYMENT,
+            null,
+            order.getTotalAmount(),
+            simulate,
+            Instant.now());
+    outboxWriter.enqueueCommand(Topics.COMMANDS_PAYMENT, capture);
   }
 
   private void emitReleaseInventory(SagaInstance saga, OrderEntity order, Simulate simulate) {

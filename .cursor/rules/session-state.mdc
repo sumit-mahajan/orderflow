@@ -6,9 +6,9 @@ alwaysApply: false
 # OrderFlow — Session State
 
 ## Status
-- **Last completed step:** Step 3 (schema.mdc LOCKED). Step 4 + 4.5 drafted (reviewer.mdc, deployment.mdc), awaiting confirm.
-- **Current in-progress:** Step 4/4.5 review gate
-- **Next immediate action:** On approval, commit Step 4/4.5 and start Step 5 — Milestone 1 (order-service + inventory-service, 1-step saga + compensation, Docker Compose infra)
+- **Last completed step:** Step 5 — **Milestone 2** (M2 implementation complete, all tests green, uncommitted)
+- **Current in-progress:** —
+- **Next immediate action:** User reviews M2 diff → approve → commit → build M3 (shipment-service + circuit breaker)
 
 ## Locked artifacts
 - `features.mdc` — LOCKED (16 features, F-01..F-16, mapped to M1–M4)
@@ -23,43 +23,64 @@ alwaysApply: false
 - Build tool: Maven multi-module monorepo + shared `common` module
 - Concurrency guard: Redis lock + Postgres `@Version` optimistic locking
 - Outbox: scheduled relay poller (`FOR UPDATE SKIP LOCKED`), not Debezium
-- Dashboard transport: SSE
+- Dashboard transport: SSE (endpoint exists on order-service; full UI in M4)
 - Frontend: dashboard at `/`, no auth, no landing page
 - Deviations approved: no LLM layer, all-local Docker Compose, no auth/landing
 - Persistence style: idiomatic Spring Data (`OrderRepository`), no adapter boilerplate
-- Delivery: virtual threads scoped to SSE + orchestrator I/O; at-least-once + idempotency
+- Delivery: at-least-once + idempotency; virtual threads deferred (not wired in M1)
+- **Additive contract (M1 demo):** `Simulate.failAfterReserve` on `PlaceOrderRequest` / `CommandMessage` — triggers compensation after successful reserve (not in original schema.mdc; record at M1 gate or amend schema)
 
 ## Milestone progress (Step 5)
-- M1 (order + inventory, 1-step saga + compensation): NOT STARTED
-- M2 (+ payment, cascading rollback): NOT STARTED
+- **M1** (order + inventory, 1-step saga + compensation): **DONE** (committed `4817f4c`)
+- **M2** (+ payment, 2-step saga, cascading rollback): **IMPLEMENTED — pending commit** (all tests green)
 - M3 (+ shipment, circuit breaker): NOT STARTED
 - M4 (dashboard + observability + demo): NOT STARTED
 
 ## Feature status (Feature Completion Gate ledger)
-| ID | Feature | Milestone | Status |
-|----|---------|-----------|--------|
-| F-01 | Place Order API | M1 | NOT STARTED |
-| F-02 | Idempotent submission | M1 | NOT STARTED |
-| F-03 | Saga state machine | M1 | NOT STARTED |
-| F-04 | Reserve inventory | M1 | NOT STARTED |
-| F-05 | Release inventory (compensation) | M1 | NOT STARTED |
-| F-06 | Orchestrated compensation | M1 | NOT STARTED |
-| F-07 | Outbox publishing | M1 | NOT STARTED |
-| F-08 | Capture/refund payment | M2 | NOT STARTED |
-| F-09 | Two-step cascading rollback | M2 | NOT STARTED |
-| F-10 | Shipment create/cancel | M3 | NOT STARTED |
-| F-11 | Circuit breaker | M3 | NOT STARTED |
-| F-12 | Full 3-step saga | M3 | NOT STARTED |
-| F-13 | Live dashboard | M4 | NOT STARTED |
-| F-14 | Mock failure injection | M2/M3 | NOT STARTED |
-| F-15 | Tracing + metrics | M4 | NOT STARTED |
-| F-16 | Demo script | M4 | NOT STARTED |
+
+| ID | Feature | Milestone | Status | Verification |
+|----|---------|-----------|--------|--------------|
+| F-01 | Place Order API | M1 | DONE | POST/GET/list + SSE. IT: 201 + saga row ✓ |
+| F-02 | Idempotent submission | M1 | DONE | Redis + DB unique. IT: same key twice → one order ✓ |
+| F-03 | Saga state machine | M1→M2 | DONE | Sealed interface; M2 adds PaymentCaptured + payment transitions. Unit tests: 8 green ✓ |
+| F-04 | Reserve inventory | M1 | DONE | Inventory-service + IT. Stock decrements on reserve ✓ |
+| F-05 | Release inventory | M1 | DONE | Idempotent release + IT replay. Stock restored on release ✓ |
+| F-06 | Orchestrated compensation | M1→M2 | DONE | M1: failAfterReserve; M2: paymentFail → release → OrderFailed. IT: 3 scenarios ✓ |
+| F-07 | Outbox publishing | M1 | DONE | Outbox + relay. Row PENDING → SENT; command reaches inventory ✓ |
+| F-08 | Capture/refund payment | M2 | DONE | payment-service: capture/refund idempotent. Unit + IT green (2 IT tests) ✓ |
+| F-09 | Two-step cascading rollback | M2 | DONE | IT: InventoryReserved → PaymentFailed → Compensating → InventoryReleased → OrderFailed ✓ |
+| F-10 | Shipment create/cancel | M3 | NOT STARTED | — |
+| F-11 | Circuit breaker | M3 | NOT STARTED | — |
+| F-12 | Full 3-step saga | M3 | NOT STARTED | — |
+| F-13 | Live dashboard | M4 | NOT STARTED | SSE endpoint only in M1 |
+| F-14 | Mock failure injection | M2/M3 | PARTIAL | M1: `failAfterReserve`; M2: `paymentFail` flag. Shipment mode deferred to M3 |
+| F-15 | Tracing + metrics | M4 | NOT STARTED | Actuator health/prometheus exposed; no Zipkin/Grafana yet |
+| F-16 | Demo script | M4 | NOT STARTED | — |
+
+## M2 deliverables (uncommitted — pending user approval)
+- `payment-service/` — capture/refund, Kafka listener, Flyway V1, unit + IT tests (2 IT scenarios)
+- `order-service/` — SagaStateMachine extended (PaymentCaptured, onPaymentCaptured, confirm from PaymentCaptured, beginCompensation from PaymentCaptured), SagaOrchestrator handles PAYMENT_CAPTURED/PAYMENT_FAILED, PaymentEventListener, KafkaConfig adds payment topics
+- `pom.xml` — payment-service module added
+- `docker-compose.yml` — payment-service added on port 8082
+- All Dockerfiles — `app-exec.jar` classifier fix (Spring Boot repackage)
+- `docker-java.properties` — `api.version=1.44` added to payment-service (Docker 29+ compat)
+- `session-state.mdc` — updated M2 status
+
+## Also fixed during M2
+- **Spring Boot repackage / IT classpath bug** — parent POM `<classifier>exec</classifier>` keeps thin jar for Failsafe; Dockerfiles copy `app-exec.jar`. This was a pre-existing M1 issue discovered when running `mvn clean verify`.
 
 ## Open questions / blockers
-- None. (Step 0 clarifications were skipped; recommended defaults adopted + recorded above.)
+- **Schema drift (resolved):** `failAfterReserve` and `paymentFail` in `Simulate` are additive — no schema change needed; documented in session-state.
+- **M2 gate pending:** user must review diff and confirm before commit.
 
 ## Commits so far
 - `chore: Step 1 lock features.mdc`
 - `chore: Step 1.5 lock ui-style.mdc`
 - `chore: Step 2 lock architecture.mdc and decisions.mdc`
 - `chore: Step 3 lock schema.mdc`
+- `chore: Step 4 + 4.5 reviewer, local deployment contract, workflow`
+- `feat: M1 order+inventory 1-step saga with compensation` (4817f4c)
+
+## Uncommitted work
+- All M2 implementation files (see M2 deliverables above)
+- Updated `session-state.mdc` (this file)
