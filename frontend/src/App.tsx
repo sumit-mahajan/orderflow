@@ -156,7 +156,7 @@ export default function App() {
   );
 
   const [customerId, setCustomerId] = useState<string>(() => crypto.randomUUID());
-  const [sku, setSku] = useState("SKU-001");
+  const [sku, setSku] = useState("SKU-LAPTOP");
   const [qty, setQty] = useState(1);
   const [amount, setAmount] = useState("499.00");
   const [paymentFail, setPaymentFail] = useState(false);
@@ -295,6 +295,7 @@ export default function App() {
 
   async function runConcurrentScenario() {
     const ordersToCreate = 20;
+    const concurrentSku = "SKU-LIMITED";
     const results = await Promise.allSettled(
       Array.from({ length: ordersToCreate }).map(() =>
         fetchJson<{ orderId: string }>("/api/orders", {
@@ -305,7 +306,7 @@ export default function App() {
           },
           body: JSON.stringify({
             customerId: crypto.randomUUID(),
-            items: [{ sku, qty: 1 }],
+            items: [{ sku: concurrentSku, qty: 1 }],
             amount: Number(amount),
             simulate: {
               paymentFail: false,
@@ -318,7 +319,9 @@ export default function App() {
     );
     const success = results.filter((result) => result.status === "fulfilled").length;
     const failed = ordersToCreate - success;
-    toast.info(`Concurrent run complete: ${success} accepted, ${failed} failed`);
+    toast.info(
+      `Concurrent run (${concurrentSku}, 3 in stock): ${success} accepted, ${failed} failed`,
+    );
   }
 
   return (
@@ -372,12 +375,16 @@ export default function App() {
             </label>
             <label className="flex flex-col gap-1 text-sm">
               SKU
-              <input
+              <select
                 className="h-11 rounded-md border border-border bg-background px-3"
                 onChange={(event) => setSku(event.target.value)}
                 required
                 value={sku}
-              />
+              >
+                <option value="SKU-LAPTOP">SKU-LAPTOP (50 in stock)</option>
+                <option value="SKU-PHONE">SKU-PHONE (5 in stock)</option>
+                <option value="SKU-LIMITED">SKU-LIMITED (3 in stock)</option>
+              </select>
             </label>
             <label className="flex flex-col gap-1 text-sm">
               Qty

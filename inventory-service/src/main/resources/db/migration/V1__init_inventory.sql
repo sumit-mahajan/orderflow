@@ -20,8 +20,8 @@ create table inventory_reservation (
     constraint uq_reservation unique (order_id, sku)
 );
 
--- Demo stock. SKU-LIMITED is intentionally scarce for the concurrent-orders demo.
+-- Demo stock. SKU-LAPTOP is the dashboard default; SKU-LIMITED is scarce for the concurrent demo.
 insert into inventory_item (sku, available_qty) values
-    ('SKU-LAPTOP', 10),
+    ('SKU-LAPTOP', 50),
     ('SKU-PHONE', 5),
     ('SKU-LIMITED', 3);

@@ -8,7 +8,7 @@ alwaysApply: false
 ## Status
 - **Last completed step:** Step 5 — **Milestone 5** (M4+M5 committed)
 - **Current in-progress:** —
-- **Next immediate action:** v1 complete — optional polish (e.g. align dashboard default SKU with seed data)
+- **Next immediate action:** v1 complete
 
 ## Locked artifacts
 - `features.mdc` — LOCKED (17 features, F-01..F-17, mapped to M1–M5)
@@ -66,7 +66,6 @@ alwaysApply: false
 
 ## Open questions / blockers
 - None — v1 scope complete.
-- Minor polish (non-blocking): dashboard default SKU is `SKU-001` but seed data uses `SKU-LAPTOP` / `SKU-PHONE` / `SKU-LIMITED`.
 
 ## Commits so far
 - `chore: Step 1 lock features.mdc`

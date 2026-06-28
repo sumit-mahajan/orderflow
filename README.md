@@ -85,8 +85,10 @@ All scenarios can be run from the dashboard controls at `http://localhost:8088`.
 ### 4) Concurrent load (~20 orders)
 
 1. Set `Shipment mode = ok` and disable failure toggles.
-2. Click `Run 20 concurrent`.
+2. Click `Run 20 concurrent` (uses `SKU-LIMITED`, 3 units — expect partial success + inventory failures).
 3. Watch live updates in table/SSE stream and compare `Confirmed`/`Failed` counts in stat cards.
+
+Default single-order flows use `SKU-LAPTOP` (50 units). Use the SKU dropdown for `SKU-PHONE` or scarce `SKU-LIMITED`.
 
 ## Local verification commands
 
