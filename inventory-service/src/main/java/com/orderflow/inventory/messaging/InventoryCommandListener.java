@@ -4,6 +4,8 @@ import com.orderflow.common.messaging.CommandMessage;
 import com.orderflow.common.messaging.EventMessage;
 import com.orderflow.inventory.service.InsufficientStockException;
 import com.orderflow.inventory.service.InventoryService;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -21,17 +23,20 @@ public class InventoryCommandListener {
 
   private final InventoryService inventoryService;
   private final EventPublisher eventPublisher;
+  private final Tracer tracer;
 
   public InventoryCommandListener(
-      InventoryService inventoryService, EventPublisher eventPublisher) {
+      InventoryService inventoryService, EventPublisher eventPublisher, Tracer tracer) {
     this.inventoryService = inventoryService;
     this.eventPublisher = eventPublisher;
+    this.tracer = tracer;
   }
 
   @KafkaListener(
       topics = com.orderflow.common.messaging.Topics.COMMANDS_INVENTORY,
       containerFactory = "commandListenerFactory")
   public void onCommand(CommandMessage cmd) {
+    tagCurrentSpan(cmd);
     log.info("Received {} for order {}", cmd.type(), cmd.correlationId());
 
     EventMessage event =
@@ -47,6 +52,15 @@ public class InventoryCommandListener {
     if (event != null) {
       eventPublisher.publish(event);
     }
+  }
+
+  private void tagCurrentSpan(CommandMessage cmd) {
+    Span span = tracer.currentSpan();
+    if (span == null) {
+      return;
+    }
+    span.tag("order.id", cmd.correlationId().toString());
+    span.tag("saga.id", cmd.sagaId().toString());
   }
 
   private EventMessage reserveSafely(CommandMessage cmd) {

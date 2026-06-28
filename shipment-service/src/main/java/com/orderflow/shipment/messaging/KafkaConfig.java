@@ -44,7 +44,9 @@ public class KafkaConfig {
 
   @Bean
   public KafkaTemplate<String, Object> kafkaTemplate() {
-    return new KafkaTemplate<>(producerFactory());
+    KafkaTemplate<String, Object> template = new KafkaTemplate<>(producerFactory());
+    template.setObservationEnabled(true);
+    return template;
   }
 
   @Bean
@@ -67,6 +69,7 @@ public class KafkaConfig {
     ConcurrentKafkaListenerContainerFactory<String, CommandMessage> factory =
         new ConcurrentKafkaListenerContainerFactory<>();
     factory.setConsumerFactory(commandConsumerFactory());
+    factory.getContainerProperties().setObservationEnabled(true);
     return factory;
   }
 

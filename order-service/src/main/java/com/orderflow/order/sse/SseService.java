@@ -33,6 +33,12 @@ public class SseService {
     emitter.onCompletion(() -> emitters.remove(emitter));
     emitter.onTimeout(() -> emitters.remove(emitter));
     emitter.onError(e -> emitters.remove(emitter));
+    try {
+      // Flush response headers immediately so proxies/browsers mark the stream open.
+      emitter.send(SseEmitter.event().comment("connected"));
+    } catch (IOException e) {
+      emitters.remove(emitter);
+    }
     return emitter;
   }
 

@@ -60,12 +60,23 @@ public class OutboxMessage {
 
   public OutboxMessage(
       String aggregateType, UUID aggregateId, String topic, String msgKey, String payload) {
+    this(aggregateType, aggregateId, topic, msgKey, payload, null);
+  }
+
+  public OutboxMessage(
+      String aggregateType,
+      UUID aggregateId,
+      String topic,
+      String msgKey,
+      String payload,
+      String headers) {
     this.id = UUID.randomUUID();
     this.aggregateType = aggregateType;
     this.aggregateId = aggregateId;
     this.topic = topic;
     this.msgKey = msgKey;
     this.payload = payload;
+    this.headers = headers;
     this.status = OutboxStatus.PENDING;
   }
 
@@ -88,6 +99,10 @@ public class OutboxMessage {
 
   public String getPayload() {
     return payload;
+  }
+
+  public String getHeaders() {
+    return headers;
   }
 
   public OutboxStatus getStatus() {

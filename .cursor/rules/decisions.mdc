@@ -151,3 +151,28 @@ Format: Decision / Context / Alternatives considered / Rejected because.
 - **Alternatives considered:** Embedded/in-memory fakes (H2, embedded Kafka).
 - **Rejected because:** In-memory substitutes diverge from real behavior (esp. Kafka/Postgres
   semantics), giving false confidence. (≈ Testcontainers for .NET.)
+
+### D-19 — M4 observability stack: Micrometer + OTel Zipkin + Prometheus + Grafana
+- **Decision:** Instrument each service with Micrometer Prometheus registry + OTel Zipkin exporter,
+  then run Zipkin/Prometheus/Grafana in local Compose with provisioned dashboards.
+- **Context:** F-15 requires cross-service tracing and operational metrics visible in local demo.
+- **Alternatives considered:** Keep actuator-only metrics; use Jaeger instead of Zipkin; skip Grafana provisioning.
+- **Rejected because:** Actuator-only lacks distributed traces and usable dashboards; Jaeger adds
+  unnecessary divergence from locked Zipkin contract; manual Grafana setup hurts reproducibility.
+
+### D-20 — M4 frontend stack: React + Tailwind served via nginx reverse proxy
+- **Decision:** Build `frontend/` with Vite React TypeScript + Tailwind and serve static assets from
+  nginx, reverse-proxying `/api` + SSE to order-service.
+- **Context:** F-13 needs a live dashboard with clean local UX while preserving existing backend API.
+- **Alternatives considered:** Raw HTML/JS page in order-service; React dev server only (no runtime image).
+- **Rejected because:** Static HTML was too rigid for live table/detail controls; dev-server-only setup
+  would not satisfy one-command Compose demo for F-16.
+
+### D-21 — Persist traceparent in outbox + span tags for order-level Zipkin lookup
+- **Decision:** Add tracing headers (`traceparent`) to outbox rows when commands are enqueued,
+  replay those headers on relay publish, and tag command/event spans with `order.id` + `saga.id`.
+- **Context:** Support incidents arrive with `orderId`; developers need fast per-order root-cause
+  lookup in Zipkin across async Kafka hops without broad log scans.
+- **Alternatives considered:** Rely on HTTP traces + manual logs only; add Prometheus labels per order.
+- **Rejected because:** HTTP-only traces miss async saga transitions; per-order metric labels create
+  unbounded cardinality and are unsafe for Prometheus/Grafana.

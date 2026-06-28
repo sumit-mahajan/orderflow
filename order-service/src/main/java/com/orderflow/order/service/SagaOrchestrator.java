@@ -8,6 +8,7 @@ import com.orderflow.common.messaging.LineItem;
 import com.orderflow.common.messaging.Simulate;
 import com.orderflow.common.messaging.Topics;
 import com.orderflow.order.domain.OrderEntity;
+import com.orderflow.order.domain.OrderStatus;
 import com.orderflow.order.domain.SagaInstance;
 import com.orderflow.order.domain.SagaStepEntity;
 import com.orderflow.order.domain.StepEnums;
@@ -57,6 +58,7 @@ public class SagaOrchestrator {
   private final OrderRepository orders;
   private final OutboxWriter outboxWriter;
   private final SseService sse;
+  private final OrderMetrics metrics;
   private final ObjectMapper json;
 
   public SagaOrchestrator(
@@ -65,12 +67,14 @@ public class SagaOrchestrator {
       OrderRepository orders,
       OutboxWriter outboxWriter,
       SseService sse,
+      OrderMetrics metrics,
       ObjectMapper json) {
     this.sagas = sagas;
     this.steps = steps;
     this.orders = orders;
     this.outboxWriter = outboxWriter;
     this.sse = sse;
+    this.metrics = metrics;
     this.json = json;
   }
 
@@ -151,7 +155,7 @@ public class SagaOrchestrator {
     saga.setCurrentState(confirmed.stateName());
     recordStep(saga, StepEnums.StepName.SHIPMENT, StepEnums.Direction.FORWARD,
         StepEnums.Status.SUCCESS, orderId, null);
-    orders.findById(orderId).ifPresent(OrderEntity::markConfirmed);
+    markOrderConfirmed(orderId);
     sagas.save(saga);
     log.info("Order {} shipment initiated (carrierRef={}) → confirmed", orderId, event.carrierRef());
   }
@@ -206,7 +210,7 @@ public class SagaOrchestrator {
     sagas.save(saga);
     recordStep(saga, StepEnums.StepName.INVENTORY, StepEnums.Direction.FORWARD,
         StepEnums.Status.FAILED, orderId, event.reason());
-    orders.findById(orderId).ifPresent(OrderEntity::markFailed);
+    markOrderFailed(orderId);
     log.info("Order {} failed at inventory: {}", orderId, event.reason());
   }
 
@@ -216,7 +220,7 @@ public class SagaOrchestrator {
     sagas.save(saga);
     recordStep(saga, StepEnums.StepName.INVENTORY, StepEnums.Direction.COMPENSATION,
         StepEnums.Status.SUCCESS, orderId, null);
-    orders.findById(orderId).ifPresent(OrderEntity::markFailed);
+    markOrderFailed(orderId);
     log.info("Order {} compensation complete (inventory released) — order failed", orderId);
   }
 
@@ -312,5 +316,29 @@ public class SagaOrchestrator {
     } else {
       sse.publishSnapshot(orderId);
     }
+  }
+
+  private void markOrderConfirmed(UUID orderId) {
+    orders
+        .findById(orderId)
+        .ifPresent(
+            order -> {
+              if (order.getStatus() != OrderStatus.CONFIRMED) {
+                order.markConfirmed();
+                metrics.recordConfirmed();
+              }
+            });
+  }
+
+  private void markOrderFailed(UUID orderId) {
+    orders
+        .findById(orderId)
+        .ifPresent(
+            order -> {
+              if (order.getStatus() != OrderStatus.FAILED) {
+                order.markFailed();
+                metrics.recordFailed();
+              }
+            });
   }
 }

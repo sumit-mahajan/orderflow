@@ -5,6 +5,8 @@ import com.orderflow.common.messaging.Topics;
 import com.orderflow.order.service.SagaLock;
 import com.orderflow.order.service.SagaLockedException;
 import com.orderflow.order.service.SagaOrchestrator;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,15 +24,18 @@ public class ShipmentEventListener {
 
   private final SagaOrchestrator orchestrator;
   private final SagaLock sagaLock;
+  private final Tracer tracer;
 
-  public ShipmentEventListener(SagaOrchestrator orchestrator, SagaLock sagaLock) {
+  public ShipmentEventListener(SagaOrchestrator orchestrator, SagaLock sagaLock, Tracer tracer) {
     this.orchestrator = orchestrator;
     this.sagaLock = sagaLock;
+    this.tracer = tracer;
   }
 
   @KafkaListener(topics = Topics.EVENTS_SHIPMENT, containerFactory = "eventListenerFactory")
   public void onShipmentEvent(EventMessage event) {
     UUID orderId = event.correlationId();
+    tagCurrentSpan(orderId, event.sagaId());
     String token = UUID.randomUUID().toString();
 
     if (!sagaLock.acquireWithRetry(orderId, token)) {
@@ -42,5 +47,14 @@ public class ShipmentEventListener {
     } finally {
       sagaLock.unlock(orderId, token);
     }
+  }
+
+  private void tagCurrentSpan(UUID orderId, UUID sagaId) {
+    Span span = tracer.currentSpan();
+    if (span == null) {
+      return;
+    }
+    span.tag("order.id", orderId.toString());
+    span.tag("saga.id", sagaId.toString());
   }
 }

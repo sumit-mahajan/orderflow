@@ -6,12 +6,12 @@ alwaysApply: false
 # OrderFlow — Session State
 
 ## Status
-- **Last completed step:** Step 5 — **Milestone 3** (M3 implementation complete, all tests green, uncommitted)
+- **Last completed step:** Step 5 — **Milestone 5** (M4+M5 committed)
 - **Current in-progress:** —
-- **Next immediate action:** User reviews M3 diff → approve → commit → build M4 (React dashboard + observability + demo)
+- **Next immediate action:** v1 complete — optional polish (e.g. align dashboard default SKU with seed data)
 
 ## Locked artifacts
-- `features.mdc` — LOCKED (16 features, F-01..F-16, mapped to M1–M4)
+- `features.mdc` — LOCKED (17 features, F-01..F-17, mapped to M1–M5)
 - `ui-style.mdc` — LOCKED (single dashboard, no landing/auth deviation)
 - `architecture.mdc` — LOCKED (orchestration, clean-but-pragmatic layering)
 - `decisions.mdc` — LOCKED (D-01..D-18; D-14/15/16 = approved deviations)
@@ -30,12 +30,17 @@ alwaysApply: false
 - Delivery: at-least-once + idempotency; virtual threads deferred (not wired in M1)
 - **Additive contract (M1 demo):** `Simulate.failAfterReserve` on `PlaceOrderRequest` / `CommandMessage`
 - **M3 CB config:** Resilience4j `@CircuitBreaker` on `ShipmentService.create`; slow-call threshold 2s; opens after 60% fail rate in 5-call window; `waitDurationInOpenState: 10s`
+- **M4 frontend stack:** Vite + React + Tailwind with SSE-first dashboard at `/` (no auth/landing, per D-16)
+- **M4 observability stack:** Zipkin + Prometheus + Grafana wired into Compose; Spring Micrometer+OTel enabled across all services
+- **M4 dashboard metrics:** Added `orderflow.orders.placed|confirmed|failed` counters in order-service for throughput/success-failure panels
+- **M5 traceability hardening:** Persist `traceparent` in outbox headers, replay headers in relay publishes, enable listener observation on custom factories, tag spans with `order.id`/`saga.id`
 
 ## Milestone progress (Step 5)
 - **M1** (order + inventory, 1-step saga + compensation): **DONE** (committed `4817f4c`)
 - **M2** (+ payment, 2-step saga, cascading rollback): **DONE** (committed `6b77ee4`)
-- **M3** (+ shipment, circuit breaker, full 3-step saga): **IMPLEMENTED — pending commit** (all tests green)
-- M4 (dashboard + observability + demo): NOT STARTED
+- **M3** (+ shipment, circuit breaker, full 3-step saga): **DONE** (committed `cf1c1db`)
+- **M4** (dashboard + observability + demo): **DONE**
+- **M5** (order-id Zipkin traceability hardening): **DONE**
 
 ## Feature status (Feature Completion Gate ledger)
 
@@ -53,21 +58,15 @@ alwaysApply: false
 | F-10 | Shipment create/cancel | M3 | DONE | Idempotent create/cancel, CB fallback. IT: 5 tests ✓ |
 | F-11 | Circuit breaker | M3 | DONE | Resilience4j @CircuitBreaker on carrier call; fail/hang mode trips breaker. IT: fallback verified ✓ |
 | F-12 | Full 3-step saga | M3 | DONE | IT: inventory→payment→shipment→Confirmed; shipment fail→refund→release→OrderFailed ✓ |
-| F-13 | Live dashboard | M4 | NOT STARTED | SSE endpoint only in M1 |
+| F-13 | Live dashboard | M4 | DONE | `frontend/` dashboard with SSE stream, per-step badges, demo controls, detail timeline; `npm run build` ✓ |
 | F-14 | Mock failure injection | M2/M3 | DONE | M1: failAfterReserve; M2: paymentFail; M3: shipmentMode ok/fail/hang ✓ |
-| F-15 | Tracing + metrics | M4 | NOT STARTED | Actuator health/prometheus exposed; no Zipkin/Grafana yet |
-| F-16 | Demo script | M4 | NOT STARTED | — |
-
-## M3 deliverables (uncommitted — pending user approval)
-- `shipment-service/` — domain (Shipment, ShipmentStatus), MockCarrierClient (ok/fail/hang), ShipmentService with @CircuitBreaker, ShipmentCommandListener, KafkaConfig, EventPublisher, Flyway V1, unit (6 tests) + IT (5 tests)
-- `order-service/` — SagaStateMachine (onShipmentInitiated, confirm from ShipmentInitiated, beginCompensation from PaymentCaptured, onPaymentRefunded), SagaOrchestrator (onPaymentCaptured→emitCreateShipment, onShipmentInitiated, onShipmentFailed, onPaymentRefunded, emitCreateShipment, emitRefundPayment), ShipmentEventListener, KafkaConfig adds shipment topics
-- `order-service/` tests — SagaStateMachineTest updated (6 tests, M3 transitions), OrderSagaIT updated (4 scenarios including full M3 cascade)
-- `pom.xml` — shipment-service module added
-- `docker-compose.yml` — shipment-service added on port 8083
-- `shipment-service/Dockerfile` — multi-stage build
+| F-15 | Tracing + metrics | M4 | DONE | OTel+Prometheus deps/config in all services + Compose Zipkin/Prometheus/Grafana + Grafana provisioned dashboard; `mvn verify` + `docker compose config` ✓ |
+| F-16 | Demo script | M4 | DONE | `README.md` includes one-command startup and 4 reproducible demo scenarios + verification steps ✓ |
+| F-17 | Order-id Zipkin traceability | M5 | DONE | Outbox `traceparent` persistence + relay header replay + `order.id`/`saga.id` span tags + support runbook docs; unit tests + runtime Zipkin annotation query proof ✓ |
 
 ## Open questions / blockers
-- None. M3 gate pending user review + commit approval.
+- None — v1 scope complete.
+- Minor polish (non-blocking): dashboard default SKU is `SKU-001` but seed data uses `SKU-LAPTOP` / `SKU-PHONE` / `SKU-LIMITED`.
 
 ## Commits so far
 - `chore: Step 1 lock features.mdc`
@@ -77,7 +76,8 @@ alwaysApply: false
 - `chore: Step 4 + 4.5 reviewer, local deployment contract, workflow`
 - `feat: M1 order+inventory 1-step saga with compensation` (4817f4c)
 - `feat: M2 payment-service 2-step saga with cascading rollback` (6b77ee4)
+- `feat: M3 shipment-service 3-step saga with circuit breaker` (`cf1c1db`)
+- `feat: M4 M5 dashboard observability and order-id traceability` (pending push)
 
 ## Uncommitted work
-- All M3 implementation files (see M3 deliverables above)
-- Updated `session-state.mdc` (this file)
+- None (M4+M5 committed this session)

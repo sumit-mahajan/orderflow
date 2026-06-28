@@ -1,9 +1,17 @@
 package com.orderflow.order.messaging;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.orderflow.order.domain.OutboxMessage;
 import com.orderflow.order.repository.OutboxRepository;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
 import java.util.List;
+import java.util.Map;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.header.internals.RecordHeader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
@@ -30,10 +38,18 @@ public class OutboxRelay {
 
   private final OutboxRepository outbox;
   private final KafkaTemplate<String, String> kafkaTemplate;
+  private final ObjectMapper json;
+  private final Tracer tracer;
 
-  public OutboxRelay(OutboxRepository outbox, KafkaTemplate<String, String> kafkaTemplate) {
+  public OutboxRelay(
+      OutboxRepository outbox,
+      KafkaTemplate<String, String> kafkaTemplate,
+      ObjectMapper json,
+      Tracer tracer) {
     this.outbox = outbox;
     this.kafkaTemplate = kafkaTemplate;
+    this.json = json;
+    this.tracer = tracer;
   }
 
   @Scheduled(fixedDelayString = "${orderflow.outbox.poll-ms:1000}")
@@ -42,8 +58,12 @@ public class OutboxRelay {
     List<OutboxMessage> batch = outbox.findBatchForPublishing(PageRequest.of(0, BATCH_SIZE));
     for (OutboxMessage message : batch) {
       try {
+        tagCurrentSpan(message.getMsgKey());
+        ProducerRecord<String, String> record =
+            new ProducerRecord<>(message.getTopic(), message.getMsgKey(), message.getPayload());
+        applyHeaders(record, message.getHeaders());
         kafkaTemplate
-            .send(message.getTopic(), message.getMsgKey(), message.getPayload())
+            .send(record)
             .get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         message.markSent(); // flushed at commit; row stays locked until then (SKIP LOCKED)
       } catch (Exception e) {
@@ -55,6 +75,32 @@ public class OutboxRelay {
             e.toString());
         break;
       }
+    }
+  }
+
+  private void applyHeaders(ProducerRecord<String, String> record, String rawHeaders) {
+    if (rawHeaders == null || rawHeaders.isBlank()) {
+      return;
+    }
+    try {
+      Map<String, String> headers = json.readValue(rawHeaders, new TypeReference<>() {});
+      for (Map.Entry<String, String> header : headers.entrySet()) {
+        if (header.getValue() == null) {
+          continue;
+        }
+        record
+            .headers()
+            .add(new RecordHeader(header.getKey(), header.getValue().getBytes(StandardCharsets.UTF_8)));
+      }
+    } catch (Exception e) {
+      log.warn("Ignoring malformed outbox headers for row {}: {}", record.key(), e.toString());
+    }
+  }
+
+  private void tagCurrentSpan(String orderId) {
+    Span span = tracer.currentSpan();
+    if (span != null) {
+      span.tag("order.id", orderId);
     }
   }
 }

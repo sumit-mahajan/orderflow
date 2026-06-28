@@ -21,6 +21,7 @@ import com.orderflow.order.messaging.OutboxWriter;
 import com.orderflow.order.repository.OrderRepository;
 import com.orderflow.order.repository.SagaInstanceRepository;
 import com.orderflow.order.repository.SagaStepRepository;
+import io.micrometer.tracing.Tracer;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
@@ -39,13 +40,16 @@ class PlaceOrderServiceTest {
   @Mock private SagaStepRepository steps;
   @Mock private OutboxWriter outboxWriter;
   @Mock private IdempotencyService idempotency;
+  @Mock private OrderMetrics metrics;
+  @Mock private Tracer tracer;
 
   private final ObjectMapper json = new ObjectMapper().registerModule(new JavaTimeModule());
   private PlaceOrderService service;
 
   @BeforeEach
   void setUp() {
-    service = new PlaceOrderService(orders, sagas, steps, outboxWriter, idempotency, json);
+    service =
+        new PlaceOrderService(orders, sagas, steps, outboxWriter, idempotency, metrics, json, tracer);
   }
 
   private static PlaceOrderRequest request() {
@@ -68,6 +72,7 @@ class PlaceOrderServiceTest {
     verify(sagas).save(any(SagaInstance.class));
     verify(outboxWriter).enqueueCommand(eq(Topics.COMMANDS_INVENTORY), any(CommandMessage.class));
     verify(steps).save(any(SagaStepEntity.class));
+    verify(metrics).recordPlaced();
   }
 
   @Test

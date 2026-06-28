@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OrderFlow - Saga Orchestration Dashboard</title>
+    <meta
+      name="description"
+      content="Live operations dashboard for OrderFlow saga orchestration across inventory, payment, and shipment."
+    />
+    <meta name="theme-color" content="#4f46e5" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="OrderFlow - Saga Orchestration Dashboard" />
+    <meta
+      property="og:description"
+      content="Track and test distributed order sagas in real time with live step-by-step status updates."
+    />
+    <meta property="og:image" content="/og-image.png" />
+    <meta property="og:url" content="http://localhost:8088" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="OrderFlow - Saga Orchestration Dashboard" />
+    <meta
+      name="twitter:description"
+      content="Observe saga state transitions, compensation flow, and circuit breaker behavior live."
+    />
+    <meta name="twitter:image" content="/og-image.png" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/logo.png" />
+    <script>
+      (function () {
+        var storageKey = "orderflow-theme";
+        var saved = localStorage.getItem(storageKey);
+        var theme = saved === "dark" ? "dark" : "light";
+        if (theme === "dark") {
+          document.documentElement.classList.add("dark");
+        } else {
+          document.documentElement.classList.remove("dark");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

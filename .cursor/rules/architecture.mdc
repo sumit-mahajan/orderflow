@@ -110,6 +110,12 @@ Per-feature: pages / components / hooks / store / services. See `ui-style.mdc` f
 - **Tracing:** OpenTelemetry SDK + Micrometer Tracing bridge; export to **Zipkin**. One
   trace spans all 4 services for an order, including **across Kafka hops** (trace context
   propagated in Kafka headers; correlationId = business key alongside W3C traceparent).
+- **Order lookup in traces (F-17):** command/event handling spans are tagged with
+  `order.id` and `saga.id`; support can query Zipkin annotation `order.id=<uuid>` to jump
+  directly to one order path without full-log scanning.
+- **Outbox trace continuity (F-17):** order-service persists `traceparent` in outbox row
+  headers and replays those headers when the relay publishes to Kafka, preserving parent
+  context across delayed async handoffs.
 - **Metrics:** Micrometer → **Prometheus** scrape endpoint per service. Track: orders
   placed/confirmed/failed counters, saga step durations (timers), compensation count,
   **circuit-breaker state/gauge** (Resilience4j Micrometer binder), Kafka consumer lag.

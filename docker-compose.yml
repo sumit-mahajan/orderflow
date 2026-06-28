@@ -1,4 +1,4 @@
-# OrderFlow local stack. M3 brings up infra + order-service + inventory-service + payment-service + shipment-service.
+# OrderFlow local stack. M4 adds frontend + observability (Zipkin, Prometheus, Grafana).
 # Run everything:        docker compose up --build
 # Run infra only:        docker compose up postgres kafka redis
 #   (then run services on host with: mvn -pl order-service spring-boot:run, etc.)
@@ -70,6 +70,7 @@ services:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
       redis: { condition: service_healthy }
+      zipkin: { condition: service_started }
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-orderflow}
       SPRING_DATASOURCE_USERNAME: ${ORDER_DB_USER:-order_user}
@@ -77,6 +78,7 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: "6379"
+      OTEL_EXPORTER_ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
     ports:
       - "8080:8080"
 
@@ -88,11 +90,13 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
+      zipkin: { condition: service_started }
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-orderflow}
       SPRING_DATASOURCE_USERNAME: ${INVENTORY_DB_USER:-inventory_user}
       SPRING_DATASOURCE_PASSWORD: ${INVENTORY_DB_PASSWORD:-inventory_pw}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OTEL_EXPORTER_ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
     ports:
       - "8081:8081"
 
@@ -104,11 +108,13 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
+      zipkin: { condition: service_started }
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-orderflow}
       SPRING_DATASOURCE_USERNAME: ${PAYMENT_DB_USER:-payment_user}
       SPRING_DATASOURCE_PASSWORD: ${PAYMENT_DB_PASSWORD:-payment_pw}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OTEL_EXPORTER_ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
     ports:
       - "8082:8082"
 
@@ -120,13 +126,62 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
+      zipkin: { condition: service_started }
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-orderflow}
       SPRING_DATASOURCE_USERNAME: ${SHIPMENT_DB_USER:-shipment_user}
       SPRING_DATASOURCE_PASSWORD: ${SHIPMENT_DB_PASSWORD:-shipment_pw}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OTEL_EXPORTER_ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
     ports:
       - "8083:8083"
+
+  zipkin:
+    image: openzipkin/zipkin:3.4.2
+    container_name: orderflow-zipkin
+    ports:
+      - "9411:9411"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: orderflow-prometheus
+    depends_on:
+      - order-service
+      - inventory-service
+      - payment-service
+      - shipment-service
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana-oss:11.1.0
+    container_name: orderflow-grafana
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_DEFAULT_HOME_DASHBOARD_UID: orderflow-observability
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: orderflow-frontend
+    depends_on:
+      - order-service
+    ports:
+      - "8088:80"
 
 volumes:
   pgdata:

@@ -23,6 +23,7 @@ build it in working, demoable slices.
 | **M2** | + payment, 2-step saga, cascading rollback | F-08, F-09 |
 | **M3** | + shipment, 3-step saga, circuit breaker | F-10, F-11, F-12 |
 | **M4** | dashboard + observability + demo | F-13, F-14, F-15, F-16 |
+| **M5** | order-id traceability hardening | F-17 |
 
 ---
 
@@ -174,6 +175,20 @@ Built in from the start to drive the demo.
 - Documented, repeatable script for: (1) happy path, (2) payment failure → inventory
   released, (3) shipment down → breaker trips → refund+release → recovery,
   (4) ~20 concurrent orders for limited stock with correct partial success + compensation.
+
+### F-17 — Order-id Zipkin traceability across async saga hops  · P1 · M5
+Support should be able to hand developers only an `orderId`, and developers should locate
+the relevant trace path in Zipkin without broad log scans.
+**Acceptance criteria**
+- Outbox rows include persisted tracing headers (at minimum W3C `traceparent`) captured
+  when commands are enqueued inside saga transactions.
+- Outbox relay forwards persisted headers to Kafka record headers when publishing commands.
+- Kafka listener/container observation is explicitly enabled in all services that use custom
+  listener factories so consume spans continue parent trace context from headers.
+- Spans are tagged with `order.id` (and `saga.id` where available) in orchestrator and
+  participant command/event handling paths so Zipkin annotation queries can target one order.
+- `README.md` documents a support handoff workflow (`orderId` + time window → Zipkin query
+  + order detail API fallback) and known limits.
 
 ---
 

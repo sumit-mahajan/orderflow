@@ -51,7 +51,11 @@ public class KafkaConfig {
 
   @Bean
   public KafkaTemplate<String, String> kafkaTemplate() {
-    return new KafkaTemplate<>(producerFactory());
+    KafkaTemplate<String, String> template = new KafkaTemplate<>(producerFactory());
+    // Outbox relay forwards persisted trace headers per message; disable template observation so
+    // scheduled-task spans do not overwrite the stored traceparent.
+    template.setObservationEnabled(false);
+    return template;
   }
 
   @Bean
@@ -73,6 +77,7 @@ public class KafkaConfig {
     ConcurrentKafkaListenerContainerFactory<String, EventMessage> factory =
         new ConcurrentKafkaListenerContainerFactory<>();
     factory.setConsumerFactory(eventConsumerFactory());
+    factory.getContainerProperties().setObservationEnabled(true);
     return factory;
   }
 

@@ -4,6 +4,8 @@ import com.orderflow.common.messaging.CommandMessage;
 import com.orderflow.common.messaging.Topics;
 import com.orderflow.shipment.service.ShipmentService;
 import com.orderflow.common.messaging.EventMessage;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -21,14 +23,18 @@ public class ShipmentCommandListener {
 
   private final ShipmentService shipmentService;
   private final EventPublisher eventPublisher;
+  private final Tracer tracer;
 
-  public ShipmentCommandListener(ShipmentService shipmentService, EventPublisher eventPublisher) {
+  public ShipmentCommandListener(
+      ShipmentService shipmentService, EventPublisher eventPublisher, Tracer tracer) {
     this.shipmentService = shipmentService;
     this.eventPublisher = eventPublisher;
+    this.tracer = tracer;
   }
 
   @KafkaListener(topics = Topics.COMMANDS_SHIPMENT, containerFactory = "commandListenerFactory")
   public void onCommand(CommandMessage cmd) {
+    tagCurrentSpan(cmd);
     log.info("Received {} for order {}", cmd.type(), cmd.correlationId());
 
     EventMessage event =
@@ -44,5 +50,14 @@ public class ShipmentCommandListener {
     if (event != null) {
       eventPublisher.publish(event);
     }
+  }
+
+  private void tagCurrentSpan(CommandMessage cmd) {
+    Span span = tracer.currentSpan();
+    if (span == null) {
+      return;
+    }
+    span.tag("order.id", cmd.correlationId().toString());
+    span.tag("saga.id", cmd.sagaId().toString());
   }
 }

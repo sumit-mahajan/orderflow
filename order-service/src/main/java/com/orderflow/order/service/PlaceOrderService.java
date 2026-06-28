@@ -18,6 +18,8 @@ import com.orderflow.order.repository.OrderRepository;
 import com.orderflow.order.repository.SagaInstanceRepository;
 import com.orderflow.order.repository.SagaStepRepository;
 import com.orderflow.order.saga.SagaState;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -45,7 +47,9 @@ public class PlaceOrderService {
   private final SagaStepRepository steps;
   private final OutboxWriter outboxWriter;
   private final IdempotencyService idempotency;
+  private final OrderMetrics metrics;
   private final ObjectMapper json;
+  private final Tracer tracer;
 
   public PlaceOrderService(
       OrderRepository orders,
@@ -53,18 +57,23 @@ public class PlaceOrderService {
       SagaStepRepository steps,
       OutboxWriter outboxWriter,
       IdempotencyService idempotency,
-      ObjectMapper json) {
+      OrderMetrics metrics,
+      ObjectMapper json,
+      Tracer tracer) {
     this.orders = orders;
     this.sagas = sagas;
     this.steps = steps;
     this.outboxWriter = outboxWriter;
     this.idempotency = idempotency;
+    this.metrics = metrics;
     this.json = json;
+    this.tracer = tracer;
   }
 
   @Transactional
   public PlaceOrderResult place(String idempotencyKey, PlaceOrderRequest request) {
     UUID orderId = UUID.randomUUID();
+    tagCurrentSpan(orderId, null);
     String bodyHash = hash(request);
 
     IdempotencyService.Acquire acquire = idempotency.acquire(idempotencyKey, orderId, bodyHash);
@@ -89,6 +98,7 @@ public class PlaceOrderService {
     orders.save(order);
 
     SagaInstance saga = new SagaInstance(orderId, new SagaState.OrderPlaced().stateName());
+    tagCurrentSpan(orderId, saga.getSagaId());
     sagas.save(saga);
 
     List<LineItem> lines =
@@ -115,7 +125,19 @@ public class PlaceOrderService {
             null));
 
     log.info("Placed order {} ({} line(s)) — reserve command enqueued", orderId, lines.size());
+    metrics.recordPlaced();
     return new PlaceOrderResult(orderId, OrderStatus.PLACED);
+  }
+
+  private void tagCurrentSpan(UUID orderId, UUID sagaId) {
+    Span span = tracer.currentSpan();
+    if (span == null) {
+      return;
+    }
+    span.tag("order.id", orderId.toString());
+    if (sagaId != null) {
+      span.tag("saga.id", sagaId.toString());
+    }
   }
 
   private Simulate toSimulate(PlaceOrderRequest request) {
